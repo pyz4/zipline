@@ -45,6 +45,7 @@ ENV PROJECT_DIR=/projects \
 RUN mkdir ${PROJECT_DIR} \
     && apt-get -y update \
     && apt-get -y install libfreetype6-dev libpng-dev libopenblas-dev liblapack-dev gfortran \
+	&& apt-get -y install wget neovim python3-neovim \
     && curl -L https://downloads.sourceforge.net/project/ta-lib/ta-lib/0.4.0/ta-lib-0.4.0-src.tar.gz | tar xvz
 
 #
@@ -62,7 +63,8 @@ RUN pip install 'numpy>=1.11.1,<2.0.0' \
   && make install \
   && pip install TA-Lib \
   && pip install matplotlib \
-  && pip install jupyter
+  && pip install jupyter \
+  && pip install nose nose-parameterized testfixtures responses
 
 #
 # This is then only file we need from source to remain in the

@@ -32,36 +32,45 @@ Position Tracking
 """
 
 from __future__ import division
+from enum import Enum
+from functools import total_ordering
 from math import copysign
-import numpy as np
 import logbook
+import numpy as np
 
 from zipline.assets import Future
 import zipline.protocol as zp
 
-log = logbook.Logger('Performance')
+log = logbook.Logger("Performance")
+
+
+class ClosingRule(Enum):
+    fifo = "FIFO"
+    lifo = "LIFO"
 
 
 class Position(object):
-    __slots__ = 'inner_position', 'protocol_position'
+    __slots__ = "inner_position", "protocol_position"
 
-    def __init__(self,
-                 asset,
-                 amount=0,
-                 cost_basis=0.0,
-                 last_sale_price=0.0,
-                 last_sale_date=None):
+    def __init__(
+        self, asset, amount=0, cost_basis=0.0, last_sale_price=0.0, last_sale_date=None
+    ):
         inner = zp.InnerPosition(
             asset=asset,
             amount=amount,
             cost_basis=cost_basis,
             last_sale_price=last_sale_price,
-            last_sale_date=last_sale_date,
+            last_sale_date=last_sale_date
         )
-        object.__setattr__(self, 'inner_position', inner)
-        object.__setattr__(self, 'protocol_position', zp.Position(inner))
+        object.__setattr__(self, "inner_position", inner)
+        object.__setattr__(self, "protocol_position", zp.Position(inner))
+        self._lots_store = set()
+        self._lots_store.add(Lot(self, asset, amount, cost_basis))
 
     def __getattr__(self, attr):
+        """
+        Attributes are stored and retrieved from the inner_position
+        """
         return getattr(self.inner_position, attr)
 
     def __setattr__(self, attr, value):
@@ -72,9 +81,7 @@ class Position(object):
         Register the number of shares we held at this dividend's ex date so
         that we can pay out the correct amount on the dividend's pay date.
         """
-        return {
-            'amount': self.amount * dividend.amount
-        }
+        return {"amount": self.amount * dividend.amount}
 
     def earn_stock_dividend(self, stock_dividend):
         """
@@ -82,10 +89,8 @@ class Position(object):
         that we can pay out the correct amount on the dividend's pay date.
         """
         return {
-            'payment_asset': stock_dividend.payment_asset,
-            'share_count': np.floor(
-                self.amount * float(stock_dividend.ratio)
-            )
+            "payment_asset": stock_dividend.payment_asset,
+            "share_count": np.floor(self.amount * float(stock_dividend.ratio)),
         }
 
     def handle_split(self, asset, ratio):
@@ -128,38 +133,48 @@ class Position(object):
         # (rounded to the nearest cent)
         return return_cash
 
-    def update(self, txn):
+    def update(self, txn, closing_rule="FIFO"):
+        # pyz NOTE: Called from ledger.PositionTracker.execute_transaction
+        closing_rule = ClosingRule(closing_rule)
+
         if self.asset != txn.asset:
-            raise Exception('updating position with txn for a '
-                            'different asset')
+            raise Exception("updating position with txn for a " "different asset")
 
-        total_shares = self.amount + txn.amount
+        # update individual lots, excess will be applied recursively
+        lots = filter(lambda x: abs(x.amount) > 0, self._lots_store)
+        lots = sorted(lots)
+        lots = reversed(lots) if closing_rule.value == "LIFO" else lots
 
-        if total_shares == 0:
-            self.cost_basis = 0.0
-        else:
-            prev_direction = copysign(1, self.amount)
-            txn_direction = copysign(1, txn.amount)
+        for lot in lots:
+            lot.update(txn)
 
-            if prev_direction != txn_direction:
-                # we're covering a short or closing a position
-                if abs(txn.amount) > abs(self.amount):
-                    # we've closed the position and gone short
-                    # or covered the short position and gone long
-                    self.cost_basis = txn.price
-            else:
-                prev_cost = self.cost_basis * self.amount
-                txn_cost = txn.amount * txn.price
-                total_cost = prev_cost + txn_cost
-                self.cost_basis = total_cost / total_shares
+        # total_shares = self.amount + txn.amount
 
-            # Update the last sale price if txn is
-            # best data we have so far
-            if self.last_sale_date is None or txn.dt > self.last_sale_date:
-                self.last_sale_price = txn.price
-                self.last_sale_date = txn.dt
+        # if total_shares == 0:
+        #     self.cost_basis = 0.0
+        # else:
+        #     prev_direction = copysign(1, self.amount)
+        #     txn_direction = copysign(1, txn.amount)
 
-        self.amount = total_shares
+        #     if prev_direction != txn_direction:
+        #         # we're covering a short or closing a position
+        #         if abs(txn.amount) > abs(self.amount):
+        #             # we've closed the position and gone short
+        #             # or covered the short position and gone long
+        #             self.cost_basis = txn.price
+        #     else:
+        #         prev_cost = self.cost_basis * self.amount
+        #         txn_cost = txn.amount * txn.price
+        #         total_cost = prev_cost + txn_cost
+        #         self.cost_basis = total_cost / total_shares
+
+        #     # Update the last sale price if txn is
+        #     # best data we have so far
+        #     if self.last_sale_date is None or txn.dt > self.last_sale_date:
+        #         self.last_sale_price = txn.price
+        #         self.last_sale_date = txn.dt
+
+        # self.amount = total_shares
 
     def adjust_commission_cost_basis(self, asset, cost):
         """
@@ -173,7 +188,7 @@ class Position(object):
         """
 
         if asset != self.asset:
-            raise Exception('Updating a commission for a different asset?')
+            raise Exception("Updating a commission for a different asset?")
         if cost == 0.0:
             return
 
@@ -209,7 +224,7 @@ last_sale_price: {last_sale_price}"
             asset=self.asset,
             amount=self.amount,
             cost_basis=self.cost_basis,
-            last_sale_price=self.last_sale_price
+            last_sale_price=self.last_sale_price,
         )
 
     def to_dict(self):
@@ -218,8 +233,68 @@ last_sale_price: {last_sale_price}"
         Returns a dict object of the form:
         """
         return {
-            'sid': self.asset,
-            'amount': self.amount,
-            'cost_basis': self.cost_basis,
-            'last_sale_price': self.last_sale_price
+            "sid": self.asset,
+            "amount": self.amount,
+            "cost_basis": self.cost_basis,
+            "last_sale_price": self.last_sale_price,
         }
+
+
+@total_ordering
+class Lot(object):
+
+    __slots__ = ("asset", "parent_container" "transaction_date", "amount", "cost_basis")
+
+    def __init__(self, parent_container, asset, transaction_date, amount, cost_basis):
+        self.asset = asset
+        self.transaction_date = transaction_date
+        self.amount = amount
+        self.cost_basis = cost_basis
+        # garbage collection safe: https://stackoverflow.com/questions/10791588/getting-container-parent-object-from-within-python
+        self.parent_container = weakref.ref(parent_container)
+
+    def __eq__(self, other):
+        return (self.asset, self.transaction_date) == (
+            other.asset,
+            other.transaction_date,
+        )
+
+    def __lt__(self, other):
+        return self.transaction_date < other.transaction_date
+
+    def __hash__(self):
+        return hash((self.asset, self.transaction_date))
+
+    def update(self, txn):
+        """
+        Lots are mostly immutable: 
+        they can only be partially or fully closed out but never expanded.
+        """
+        if self.asset != txn.asset:
+            raise Exception("updating lot with a transaction for a different asset")
+
+        cleared = copysign(
+            min(abs(self.amount), abs(txn.amount)), txn.amount
+        )  # close out
+        excess = self.amount + txn.amount if abs(txn.amount) > abs(self.amount) else 0
+
+        # first process cleared amounts and adjust basis
+        # if fully closed out, basis will calculate to 0
+        total_shares = self.amount + txn.amount
+
+        prev_cost = self.cost_basis * self.amount
+        txn_cost = txn.amount * txn.price
+        total_cost = prev_cost + txn_cost
+        self.cost_basis = total_cost / total_shares
+
+        # update for consistency
+        if self.last_sale_date is None or txn.dt > self.last_sale_date:
+            self.last_sale_price = txn.price
+            self.last_sale_date = txn.dt
+
+        self.amount = self.amount + cleared
+
+        # if txn closes out entire lot with excess, then treat excess as a new transaction to be updated with
+        if excess:
+            new_txn = Transaction(txn.asset, excess, txn.dt, txn.price, txn.order_id)
+            self.parent_container.update(new_txn)

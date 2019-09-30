@@ -409,6 +409,7 @@ class Ledger(object):
         # This dt is not the previous minute to the minute for which the
         # calculation is done, but the last sale price either before the period
         # start, or when the price at execution.
+        # TODO: need to do something here
         self._payout_last_sale_prices = {}
 
     @property
@@ -477,6 +478,7 @@ class Ledger(object):
         p.cash += amount
 
     def process_transaction(self, transaction):
+        # pyz NOTE: processes new transactions
         """Add a transaction to ledger, updating the current state as needed.
 
         Parameters
@@ -509,6 +511,7 @@ class Ledger(object):
                 else:
                     self._payout_last_sale_prices[asset] = price
         else:
+            # TODO: update with long and short-term pnl cash flow
             self._cash_flow(-(transaction.price * transaction.amount))
 
         self.position_tracker.execute_transaction(transaction)
@@ -735,6 +738,7 @@ class Ledger(object):
             (1 + returns) -
             1
         )
+        # TODO: update long-term and short-term pnl values
 
         # the portfolio has been fully synced
         self._dirty_portfolio = False

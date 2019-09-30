@@ -304,6 +304,8 @@ class SimulationBlotter(Blotter):
                 order.handle_split(ratio)
 
     def get_transactions(self, bar_data):
+        # pyz NOTE: order gives us what to buy and sell. Turning them into transactions is where
+        # tax arbitrage can be done.
         """
         Creates a list of transactions based on the current open orders,
         slippage model, and commission model.

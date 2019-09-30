@@ -195,6 +195,9 @@ class SlippageModel(with_metaclass(FinancialModelMeta)):
                 execution_price, execution_volume = \
                     self.process_order(data, order)
 
+                # pyz NOTE: transaction created on fulfilling an order
+                # create_transaction is found in zipline.finance.transaction
+                # txn is an zipline.finance.transaction.Transaction object
                 if execution_price is not None:
                     txn = create_transaction(
                         order,
