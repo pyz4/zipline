@@ -27,6 +27,17 @@
 #
 FROM quantopian/zipline
 
+RUN apt-get -y update \
+	&& apt-get -y install wget neovim python3-neovim ctags \
+	&& apt-get -y install silversearcher-ag
+
+
+# install neovim setup
+ADD https://raw.githubusercontent.com/pyz4/vim_runtime/master/vimrc /root/.config/nvim/init.vim
+RUN curl -fLo ${HOME}/.local/share/nvim/site/autoload/plug.vim --create-dirs https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
+RUN nvim +PlugInstall +qall
+RUN pip install neovim
+
 WORKDIR /zipline
 
 RUN pip install -r etc/requirements_dev.txt -r etc/requirements_blaze.txt

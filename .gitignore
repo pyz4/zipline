@@ -78,3 +78,6 @@ TAGS
 .gdb_history
 
 *.dSYM/
+
+# environments
+.venv/*
