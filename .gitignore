@@ -79,5 +79,5 @@ TAGS
 
 *.dSYM/
 
-# venv
+# environments
 .venv/*

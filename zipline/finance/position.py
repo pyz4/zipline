@@ -37,8 +37,10 @@ from functools import total_ordering
 from math import copysign
 import logbook
 import numpy as np
+import weakref
 
 from zipline.assets import Future
+from zipline.finance.transaction import Transaction
 import zipline.protocol as zp
 
 log = logbook.Logger("Performance")
@@ -60,12 +62,20 @@ class Position(object):
             amount=amount,
             cost_basis=cost_basis,
             last_sale_price=last_sale_price,
-            last_sale_date=last_sale_date
+            last_sale_date=last_sale_date,
+            _lots_store=set(),
         )
         object.__setattr__(self, "inner_position", inner)
         object.__setattr__(self, "protocol_position", zp.Position(inner))
-        self._lots_store = set()
-        self._lots_store.add(Lot(self, asset, amount, cost_basis))
+        # self.add_lot(
+        #     Lot(
+        #         parent_container=self,
+        #         asset=asset,
+        #         transaction_date=last_sale_date,
+        #         amount=amount,
+        #         cost_basis=cost_basis,
+        #     )
+        # )
 
     def __getattr__(self, attr):
         """
@@ -134,47 +144,43 @@ class Position(object):
         return return_cash
 
     def update(self, txn, closing_rule="FIFO"):
+        print("Updating with", txn)
         # pyz NOTE: Called from ledger.PositionTracker.execute_transaction
         closing_rule = ClosingRule(closing_rule)
 
         if self.asset != txn.asset:
             raise Exception("updating position with txn for a " "different asset")
 
-        # update individual lots, excess will be applied recursively
+        # lots that have amount == 0 should probably be deleted, leaving in here for now
+        # I think this is passing by value here
         lots = filter(lambda x: abs(x.amount) > 0, self._lots_store)
-        lots = sorted(lots)
-        lots = reversed(lots) if closing_rule.value == "LIFO" else lots
 
-        for lot in lots:
+        txn_direction = copysign(1, txn.amount)
+        if not list(filter(lambda x: copysign(1, x.amount) * txn_direction < 1, lots)):
+            print("always new lot")
+            # either nothing or no lots that may be closed out
+            new_lot = Lot(self, txn.asset, txn.dt, txn.amount, txn.amount * txn.price)
+            self.add_lot(new_lot)
+        else:
+            lot = max(lots) if closing_rule.value == 'LIFO' else min(lots)
+            print("Lot {} is being updated".format(hex(id(lot))))
             lot.update(txn)
+                                
+        # update position values to maintain compatibility 
+        total_shares = sum([x.amount for x in lots])
+        total_value = sum([x.amount * x.cost_basis for x in lots])
+        
+        self.amount = total_shares
+        self.cost_basis = (total_value / total_shares) if total_shares else 0
 
-        # total_shares = self.amount + txn.amount
+        # Update the last sale price if txn is
+        # best data we have so far
+        if self.last_sale_date is None or txn.dt > self.last_sale_date:
+            self.last_sale_price = txn.price
+            self.last_sale_date = txn.dt
 
-        # if total_shares == 0:
-        #     self.cost_basis = 0.0
-        # else:
-        #     prev_direction = copysign(1, self.amount)
-        #     txn_direction = copysign(1, txn.amount)
-
-        #     if prev_direction != txn_direction:
-        #         # we're covering a short or closing a position
-        #         if abs(txn.amount) > abs(self.amount):
-        #             # we've closed the position and gone short
-        #             # or covered the short position and gone long
-        #             self.cost_basis = txn.price
-        #     else:
-        #         prev_cost = self.cost_basis * self.amount
-        #         txn_cost = txn.amount * txn.price
-        #         total_cost = prev_cost + txn_cost
-        #         self.cost_basis = total_cost / total_shares
-
-        #     # Update the last sale price if txn is
-        #     # best data we have so far
-        #     if self.last_sale_date is None or txn.dt > self.last_sale_date:
-        #         self.last_sale_price = txn.price
-        #         self.last_sale_date = txn.dt
-
-        # self.amount = total_shares
+    def add_lot(self, lot):
+        self._lots_store.add(lot)
 
     def adjust_commission_cost_basis(self, asset, cost):
         """
@@ -243,7 +249,7 @@ last_sale_price: {last_sale_price}"
 @total_ordering
 class Lot(object):
 
-    __slots__ = ("asset", "parent_container" "transaction_date", "amount", "cost_basis")
+    __slots__ = ("asset", "parent_container", "transaction_date", "amount", "cost_basis")
 
     def __init__(self, parent_container, asset, transaction_date, amount, cost_basis):
         self.asset = asset
@@ -251,7 +257,7 @@ class Lot(object):
         self.amount = amount
         self.cost_basis = cost_basis
         # garbage collection safe: https://stackoverflow.com/questions/10791588/getting-container-parent-object-from-within-python
-        self.parent_container = weakref.ref(parent_container)
+        self.parent_container = parent_container
 
     def __eq__(self, other):
         return (self.asset, self.transaction_date) == (
@@ -285,12 +291,10 @@ class Lot(object):
         prev_cost = self.cost_basis * self.amount
         txn_cost = txn.amount * txn.price
         total_cost = prev_cost + txn_cost
-        self.cost_basis = total_cost / total_shares
-
-        # update for consistency
-        if self.last_sale_date is None or txn.dt > self.last_sale_date:
-            self.last_sale_price = txn.price
-            self.last_sale_date = txn.dt
+        try:
+            self.cost_basis = total_cost / total_shares
+        except ZeroDivisionError:
+            self.cost_basis = 0.0
 
         self.amount = self.amount + cleared
 
@@ -298,3 +302,9 @@ class Lot(object):
         if excess:
             new_txn = Transaction(txn.asset, excess, txn.dt, txn.price, txn.order_id)
             self.parent_container.update(new_txn)
+
+
+
+
+
+
