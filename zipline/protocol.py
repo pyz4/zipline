@@ -15,10 +15,11 @@
 from warnings import warn
 
 import pandas as pd
+import numpy as np
 
+from ._protocol import BarData, InnerPosition  # noqa
 from .assets import Asset
 from .utils.enum import enum
-from ._protocol import BarData, InnerPosition  # noqa
 
 
 class MutableView(object):
@@ -190,16 +191,17 @@ class Portfolio(object):
         self_.starting_cash = capital_base
         self_.portfolio_value = capital_base
         self_.pnl = 0.0
-        self_.pnl_long_term = 0
-        self_.pnl_short_term = 0
+        self_.pnl_realized=pd.DataFrame(
+                np.zeros((2, 2)),
+                columns=["long_term", "short_term"],
+                index=["long", "short"],
+            )        
         self_.returns = 0.0
         self_.cash = capital_base
         self_.positions = Positions()
         self_.start_date = start_date
         self_.positions_value = 0.0
         self_.positions_exposure = 0.0
-
-        # TODO: set values storing long and short-term pnl
 
     @property
     def capital_used(self):

@@ -980,13 +980,15 @@ cdef class InnerPosition:
                  cost_basis=0.0,
                  last_sale_price=0.0,
                  last_sale_date=None,
-                 _lots_store=None):
+                 pnl_realized=None,
+                 lots=None):
         self.asset = asset
         self.amount = amount
         self.cost_basis = cost_basis  # per share
         self.last_sale_price = last_sale_price
         self.last_sale_date = last_sale_date
-        self._lots_store = _lots_store
+        self.pnl_realized = pnl_realized
+        self.lots = lots
 
     def __repr__(self):
         return (

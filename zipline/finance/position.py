@@ -32,24 +32,21 @@ Position Tracking
 """
 
 from __future__ import division
+from copy import deepcopy
 from enum import Enum
 from functools import total_ordering
 from math import copysign
 import logbook
 import numpy as np
-import weakref
 import pandas as pd
+import weakref
 
 from zipline.assets import Future
 from zipline.finance.transaction import Transaction
+from zipline.utils.functional import rdict
 import zipline.protocol as zp
 
 log = logbook.Logger("Performance")
-
-
-class ClosingRule(Enum):
-    fifo = "FIFO"
-    lifo = "LIFO"
 
 
 class Position(object):
@@ -64,7 +61,12 @@ class Position(object):
             cost_basis=cost_basis,
             last_sale_price=last_sale_price,
             last_sale_date=last_sale_date,
-            _lots_store=set(),
+            pnl_realized=pd.DataFrame(
+                np.zeros((2, 2)),
+                columns=["long_term", "short_term"],
+                index=["long", "short"],
+            ),
+            lots=set(),
         )
         object.__setattr__(self, "inner_position", inner)
         object.__setattr__(self, "protocol_position", zp.Position(inner))
@@ -77,6 +79,19 @@ class Position(object):
 
     def __setattr__(self, attr, value):
         setattr(self.inner_position, attr, value)
+
+    @property
+    def has_uncollected_pnl(self):
+        return np.count_nonzero(self.pnl_realized.values, axis=None)
+
+    def collect_pnl_and_reset(self):
+        pnl_realized_copy = self.pnl_realized.copy(deep=True)
+
+        # reset
+        zeros = np.zeros((2, 2))
+        self.pnl_realized = pd.DataFrame(zeros).reindex_like(self.pnl_realized)
+
+        return pnl_realized_copy
 
     def earn_dividend(self, dividend):
         """
@@ -135,24 +150,31 @@ class Position(object):
         # (rounded to the nearest cent)
         return return_cash
 
-    def update(self, txn, closing_rule="FIFO"):
+    def update(self, txn):
         # pyz NOTE: Called from ledger.PositionTracker.execute_transaction
-        closing_rule = ClosingRule(closing_rule)
-
         if self.asset != txn.asset:
             raise Exception("updating position with txn for a " "different asset")
 
-        # clean out the store so that we don't fall into a recursive rut
+        # clean out the store so that we don't fall into infinite recursion
         self._clean_lots()
-        lots = self._lots_store
+        lots = self.lots
 
+        # txn is in the same direction as all current lots
+        # then, we're not closing out anything and we just open a new lot
         txn_direction = copysign(1, txn.amount)
-        if not list(filter(lambda x: copysign(1, x.amount) * txn_direction < 1, lots)):
+        if all(copysign(1, x.amount) == txn_direction for x in lots):
             # either nothing or no lots that may be closed out
             new_lot = Lot(self, txn.asset, txn.dt, txn.amount, txn.amount * txn.price)
             self._add_lot(new_lot)
-        else:
-            lot = max(lots) if closing_rule.value == "LIFO" else min(lots)
+        else:  # otherwise, we try to close out a currently held lot
+            # user selection for lots take precedence
+            # but default is FIFO rule
+            if txn.target_lots:
+                lot = txn.target_lots.pop(0)
+            else:
+                closing_rule = txn.closing_rule or min  # effectively FIFO
+                lot = closing_rule(lots)
+            # pass remaining target_lots for later recursive function calls
             lot.update(txn)
 
         # update position values to maintain compatibility
@@ -173,12 +195,12 @@ class Position(object):
         self.amount = total_shares
 
     def _add_lot(self, lot):
-        self._lots_store.add(lot)
+        self.lots.add(lot)
 
     def _clean_lots(self):
-        for lot in self._lots_store.copy():
+        for lot in self.lots.copy():
             if not abs(lot.amount):
-                self._lots_store.remove(lot)
+                self.lots.remove(lot)
 
     def adjust_commission_cost_basis(self, asset, cost):
         """
@@ -221,9 +243,6 @@ class Position(object):
         new_cost = prev_cost + cost_to_use
         self.cost_basis = new_cost / self.amount
 
-    def get_lots(self):
-        return self._lots_store
-
     def __repr__(self):
         template = "asset: {asset}, amount: {amount}, cost_basis: {cost_basis}, \
 last_sale_price: {last_sale_price}"
@@ -244,6 +263,7 @@ last_sale_price: {last_sale_price}"
             "amount": self.amount,
             "cost_basis": self.cost_basis,
             "last_sale_price": self.last_sale_price,
+            "lots": self.lots
         }
 
 
@@ -255,8 +275,6 @@ class Lot(object):
         "asset",
         "cost_basis",
         "parent_container",
-        "pnl_long_term",
-        "pnl_short_term",
         "transaction_date",
     )
 
@@ -267,8 +285,6 @@ class Lot(object):
         self.cost_basis = cost_basis
         # garbage collection safe: https://stackoverflow.com/questions/10791588/getting-container-parent-object-from-within-python
         self.parent_container = parent_container
-        self.pnl_long_term = 0.0
-        self.pnl_short_term = 0.0
 
     def __eq__(self, other):
         return (self.asset, self.transaction_date) == (
@@ -282,6 +298,18 @@ class Lot(object):
     def __hash__(self):
         return hash((self.asset, self.transaction_date))
 
+    def __repr__(self):
+        template = "Lot(parent_container={parent_container}, asset={asset}, \
+                transaction_date={transaction_date}, amount={amount}, \
+                cost_basis={cost_basis})"
+        return template.format(
+            parent_container=self.parent_container,
+            asset=self.asset,
+            transaction_date=self.transaction_date,
+            amount=self.amount,
+            cost_basis=self.cost_basis,
+        )
+
     def update(self, txn):
         """
         Lots are mostly immutable: 
@@ -290,9 +318,9 @@ class Lot(object):
         if self.asset != txn.asset:
             raise Exception("updating lot with a transaction for a different asset")
 
-        cleared = copysign(
-            min(abs(self.amount), abs(txn.amount)), txn.amount
-        )  # close out
+        # the number of shares that are closed out
+        cleared = copysign(min(abs(self.amount), abs(txn.amount)), self.amount)
+        # number of shares left-over, treated as new transaction
         excess = self.amount + txn.amount if abs(txn.amount) > abs(self.amount) else 0
 
         # first process cleared amounts and adjust basis
@@ -301,12 +329,19 @@ class Lot(object):
 
         # calculate pnl based on what has been cleared before the cost_basis as been adjusted
         # pnl calculations should account for shorts as well
-        pnl = cleared * (txn.price - self.cost_basis)
-        if self.transaction_date < txn.dt - pd.Timedelta(days=365):
-            self.pnl_long_term += pnl
-        else:
-            self.pnl_short_term += pnl
+        over_year_long = self.transaction_date < txn.dt - pd.Timedelta(days=365)
+        holding_period = "long_term" if over_year_long else "short_term"
+        cleared_direction = "long" if copysign(1, cleared) > 0 else "short"
 
+        pnl = cleared * (txn.price - self.cost_basis)
+        pnl_realized = pd.DataFrame().reindex_like(self.parent_container.pnl_realized)
+        pnl_realized.loc[cleared_direction, holding_period] = pnl
+
+        self.parent_container.pnl_realized = self.parent_container.pnl_realized.add(
+            pnl_realized, fill_value=0
+        )
+
+        # update rest of the metrics
         prev_cost = self.cost_basis * self.amount
         txn_cost = txn.amount * txn.price
         total_cost = prev_cost + txn_cost
@@ -315,9 +350,18 @@ class Lot(object):
         except ZeroDivisionError:
             self.cost_basis = 0.0
 
-        self.amount = self.amount + cleared
+        self.amount = self.amount - cleared
 
-        # if txn closes out entire lot with excess, then treat excess as a new transaction to be updated with
+        # if txn closes out entire lot with excess,
+        # then treat excess as a new transaction to be updated with
         if excess:
-            new_txn = Transaction(txn.asset, excess, txn.dt, txn.price, txn.order_id)
+            new_txn = Transaction(
+                txn.asset,
+                excess,
+                txn.dt,
+                txn.price,
+                txn.order_id,
+                txn.target_lots,
+                txn.closing_rule,
+            )
             self.parent_container.update(new_txn)

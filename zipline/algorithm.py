@@ -1224,7 +1224,9 @@ class TradingAlgorithm(object):
               amount,
               limit_price=None,
               stop_price=None,
-              style=None):
+              style=None,
+              target_lots=[],
+              closing_rule=min):
         """Place an order for a fixed number of shares.
 
         Parameters
@@ -1241,6 +1243,11 @@ class TradingAlgorithm(object):
             The stop price for the order.
         style : ExecutionStyle, optional
             The execution style for the order.
+        target_lots : list of Lots, optional
+            How the order should be allocated among the lots
+        closing_rule : callable, optional
+            Function mapping Position.get_lots() -> Lot
+            Secondary to target_lots. Default is min (i.e. FIFO)
 
         Returns
         -------
@@ -1269,7 +1276,7 @@ class TradingAlgorithm(object):
 
         amount, style = self._calculate_order(asset, amount,
                                               limit_price, stop_price, style)
-        return self.blotter.order(asset, amount, style)
+        return self.blotter.order(asset, amount, style, target_lots=target_lots, closing_rule=closing_rule)
 
     def _calculate_order(self, asset, amount,
                          limit_price=None, stop_price=None, style=None):

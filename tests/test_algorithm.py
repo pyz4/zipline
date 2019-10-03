@@ -785,6 +785,154 @@ class TestSetSymbolLookupDate(zf.WithMakeAlgo, zf.ZiplineTestCase):
         self.run_algorithm(initialize=initialize)
 
 
+class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
+    START_DATE = pd.Timestamp("2006-01-03", tz="utc")
+    END_DATE = START_DATE + pd.Timedelta(days=800)
+    SIM_PARAMS_CAPITAL_BASE = 1000
+
+    ASSET_FINDER_EQUITY_SIDS = (1, 133)
+
+    SIM_PARAMS_DATA_FREQUENCY = "daily"
+
+    @classmethod
+    def make_equity_daily_bar_data(cls, country_code, sids):
+        days = len(cls.equity_daily_bar_days)
+        prices = np.arange(1, days + 1)
+        frame = pd.DataFrame(
+            {
+                "open": prices,
+                "high": prices,
+                "low": prices,
+                "close": prices,
+                "volume": 100,
+            },
+            index=cls.equity_daily_bar_days,
+        )
+        return ((sid, frame) for sid in sids)
+
+    def test_pnl_realized(self):
+        """
+        Ensure that a short position is opened when a long position is
+        closed out when transacting in more than the shares necessary.
+        """
+        from itertools import count
+
+        # simple open close
+        def initialize(context, asset):
+            context.start_date = context.get_datetime()
+            context.asset = context.sid(asset)
+            context.counter = count()
+            # buy 1 first 4 days, close out all last day
+
+            context.order_amounts = np.repeat(0, len(self.equity_daily_bar_days))
+            context.order_amounts[0] = 2  # buy 2 lot on first day
+            context.order_amounts[69] = -1  # sell 1 lot on 69th day
+            context.order_amounts[-30] = -1  # close out final lot
+
+        # runs once per day
+        # reuse handle_data
+        def handle_data(context, data):
+            try:
+                amount = context.order_amounts[next(context.counter)]
+
+                context.order(context.asset, amount)
+            except IndexError:
+                pass
+
+            context.record(
+                num_positions=len(context.portfolio.positions),
+                pnl=context.portfolio.pnl,
+                pnl_long_term=context.portfolio.pnl_realized.loc[:, "long_term"].sum(),
+                pnl_short_term=context.portfolio.pnl_realized.loc[
+                    :, "short_term"
+                ].sum(),
+            )
+
+        result = self.run_algorithm(
+            initialize=initialize,
+            handle_data=handle_data,
+            asset=self.ASSET_FINDER_EQUITY_SIDS[0],
+        )
+
+        self.assertTrue(result.pnl_short_term[70] > 0.0)
+        self.assertTrue(result.pnl_long_term[-30] == 0.0)
+        self.assertTrue(result.pnl_long_term[-29] > 0.0)
+
+    def test_close_lots(self):
+        """
+        Ensure that a short position is opened when a long position is
+        closed out when transacting in more than the shares necessary.
+        """
+        from itertools import count
+
+        # simple open close
+        def initialize(context, asset):
+            context.start_date = context.get_datetime()
+            context.asset = context.sid(asset)
+            context.counter = count()
+
+        # runs once per day
+        # reuse handle_data
+        def handle_data(context, data):
+            day = next(context.counter)
+
+            if day == 0:
+                context.order(context.asset, 2, target_lots=[])
+
+            if day == 1:
+                context.order(context.asset, 3, target_lots=[])
+
+            if day == 2:
+                context.order(context.asset, 1, target_lots=[])
+
+            if day == 3:
+                # sell lot acquired on day 1
+                lot = sorted(context.portfolio.positions[context.asset].lots)[1]
+                context.order(context.asset, -2, target_lots=[lot])
+
+            if day == 4:
+                lot = sorted(context.portfolio.positions[context.asset].lots)[2]
+                context.order(context.asset, -5, target_lots=[lot])
+
+
+            lots = context.portfolio.positions[context.asset].lots
+
+            try:
+                num_lots = len(lots)
+            except TypeError:
+                num_lots = 0
+
+            if lots is not None: 
+                context.record(
+                    num_lots=num_lots,
+                    lot_amounts=[n.amount for n in sorted(lots)]
+                )
+
+        asset = self.ASSET_FINDER_EQUITY_SIDS[0]
+        result = self.run_algorithm(
+            initialize=initialize, handle_data=handle_data, asset=asset
+        )
+
+        # expected number of lots
+        expected = [(1, 1), (2, 2), (3, 3), (4, 3), (5, 1)]
+        for i, exp in expected:
+            idx = result.index[i]
+            self.assertEqual(exp, result.loc[idx, 'num_lots'])
+
+        expected = [
+            # (0, []),
+            (1, [2]),
+            (2, [2, 3]),
+            (3, [2, 3, 1]),
+            (4, [2, 1, 1]),
+            (5, [-1]),
+        ]
+
+        for i, exp in expected:
+            idx = result.index[i]
+            self.assertEqual(exp, result.loc[idx, 'lot_amounts'])
+
+
 class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
     START_DATE = pd.Timestamp("2006-01-03", tz="utc")
     END_DATE = pd.Timestamp("2006-01-06", tz="utc")
@@ -908,11 +1056,10 @@ class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
                     context.exited = True
                     context.transaction_date = context.get_datetime()
 
-            print(type(context.portfolio.positions[context.asset]))
             context.record(
                 num_positions=len(context.portfolio.positions),
                 amount=context.portfolio.positions[context.asset].amount,
-                lots=context.portfolio.positions[context.asset]._lots_store
+                lots=context.portfolio.positions[context.asset].lots,
             )
 
         result = self.run_algorithm(
@@ -922,8 +1069,8 @@ class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
         )
 
         last_day = result.loc[result.index[-1]]
-        self.assertEqual(last_day['amount'], -4)
-        self.assertEqual(len(last_day['lots']), 1)
+        self.assertEqual(last_day["amount"], -4)
+        self.assertEqual(len(last_day["lots"]), 1)
 
     def test_noop_orders(self):
         asset = self.asset_finder.retrieve_asset(1)
@@ -1303,9 +1450,10 @@ class TestBeforeTradingStart(zf.WithMakeAlgo, zf.ZiplineTestCase):
         def before_trading_start(context, data):
             bts_portfolio = context.portfolio
             # Assert that the portfolio in BTS is the same as the last
-            # portfolio in handle_data, except for the positions
+            # portfolio in handle_data, except for the positions (OrderedDict)
+            # and pnl_realized (DataFrame)
             for k in bts_portfolio.__dict__:
-                if k != 'positions':
+                if k not in ['positions', 'pnl_realized']:
                     assert (context.hd_portfolio.__dict__[k]
                             == bts_portfolio.__dict__[k])
             record(pos_value=bts_portfolio.positions_value)
@@ -3118,8 +3266,7 @@ class TestTradingControls(zf.WithMakeAlgo, zf.ZiplineTestCase):
         algo = self.make_algo(initialize=initialize, handle_data=handle_data)
         self.check_algo_fails(algo, 0)
 
-        # Buy on even days, sell on odd days.  Never takes a short position, so
-        # should succeed.
+        # Buy on even days, sell on odd days.  Never takes a short position, so should succeed.
         def handle_data(algo, data):
             if (algo.order_count % 2) == 0:
                 algo.order(algo.sid(self.sid), 1)
@@ -3920,6 +4067,7 @@ class TestDailyEquityAutoClose(zf.WithMakeAlgo, zf.ZiplineTestCase):
                     "dt": last_minute_of_session,
                     "price": initial_fill_prices[asset],
                     "sid": asset,
+                    "target_lots": [],
                 },
                 txn,
             )
@@ -3943,6 +4091,8 @@ class TestDailyEquityAutoClose(zf.WithMakeAlgo, zf.ZiplineTestCase):
                 "price": fp0,
                 "sid": assets[0],
                 "order_id": None,  # Auto-close txns emit Nones for order_id.
+                "target_lots": [],
+                "closing_rule": None,
             },
         )
 
@@ -3958,6 +4108,8 @@ class TestDailyEquityAutoClose(zf.WithMakeAlgo, zf.ZiplineTestCase):
                 "price": fp1,
                 "sid": assets[1],
                 "order_id": None,  # Auto-close txns emit Nones for order_id.
+                "target_lots": [],
+                "closing_rule": None,
             },
         )
 
@@ -4251,6 +4403,8 @@ class TestMinutelyEquityAutoClose(zf.WithMakeAlgo, zf.ZiplineTestCase):
                 "price": fp0,
                 "sid": assets[0],
                 "order_id": None,  # Auto-close txns emit Nones for order_id.
+                "target_lots": [],
+                "closing_rule": None,
             },
         )
 
@@ -4266,6 +4420,8 @@ class TestMinutelyEquityAutoClose(zf.WithMakeAlgo, zf.ZiplineTestCase):
                 "price": fp1,
                 "sid": assets[1],
                 "order_id": None,  # Auto-close txns emit Nones for order_id.
+                "target_lots": [],
+                "closing_rule": None,
             },
         )
 
