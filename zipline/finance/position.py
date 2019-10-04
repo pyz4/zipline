@@ -36,6 +36,7 @@ from copy import deepcopy
 from enum import Enum
 from functools import total_ordering
 from math import copysign
+from textwrap import dedent
 import logbook
 import numpy as np
 import pandas as pd
@@ -162,15 +163,30 @@ class Position(object):
 
             # txn is in the same direction as all current lots
             # then, we're not closing out anything and we just open a new lot
+
+            new_lot = Lot(
+                txn.asset,
+                transaction_date=txn.dt,
+                amount=txn.amount,
+                cost_basis=txn.price,
+            )
             txn_direction = copysign(1, txn.amount)
-            if all(copysign(1, x.amount) == txn_direction for x in lots):
-                # either nothing or no lots that may be closed out
-                new_lot = Lot(txn.asset, txn.dt, txn.amount, txn.amount * txn.price)
+
+            # default values modified if closing out a lot
+            excess = 0
+            pnl_realized = PNL_REALIZED_ZERO
+            # already have the lot (i.e. order on the same day), update that lot
+            if new_lot in self.lots:
+                # earlier order on same day
+                lot = self._get_lot(new_lot)
+                lot.update(txn)
+
+            # if no lots to close out, open a new lot
+            elif all(copysign(1, x.amount) == txn_direction for x in lots):
                 self._add_lot(new_lot)
 
-                excess = 0
-                pnl_realized = PNL_REALIZED_ZERO
-            else:  # otherwise, we try to close out a currently held lot
+            # otherwise, try to close out a currently held lot
+            else:
                 # user selection for lots take precedence
                 # but default is FIFO rule
                 if txn.target_lots:
@@ -220,6 +236,13 @@ class Position(object):
             if not abs(lot.amount):
                 self.lots.remove(lot)
 
+    def _get_lot(self, lot):
+        if lot not in self.lots:
+            raise KeyError("{lot} cannot be found in {position}".format(lot, self))
+
+        found = min(filter(lambda x: x == lot, self.lots))
+        return found
+
     def adjust_commission_cost_basis(self, asset, cost):
         """
         A note about cost-basis in zipline: all positions are considered
@@ -261,9 +284,16 @@ class Position(object):
         new_cost = prev_cost + cost_to_use
         self.cost_basis = new_cost / self.amount
 
+        # NOTE: to ensure the aggregate cost basis per share of the lots is
+        # consistent with the over-all position cost basis per share,
+        # apply the same adjustment to the latest acquired lot.
+        adjustment = cost_to_use / self.amount
+        max(self.lots).adjust_cost_basis(adjustment)
+
     def __repr__(self):
-        template = "asset: {asset}, amount: {amount}, cost_basis: {cost_basis}, \
-last_sale_price: {last_sale_price}"
+        template = dedent("asset: {asset}, amount: {amount}, \
+                cost_basis: {cost_basis}, \
+                last_sale_price: {last_sale_price}")
         return template.format(
             asset=self.asset,
             amount=self.amount,
@@ -320,6 +350,9 @@ class Lot(object):
             cost_basis=self.cost_basis,
         )
 
+    def adjust_cost_basis(self, adjustment):
+        self.cost_basis += adjustment
+
     def update(self, txn):
         """
         Lots are mostly immutable: 
@@ -328,10 +361,22 @@ class Lot(object):
         if self.asset != txn.asset:
             raise Exception("updating lot with a transaction for a different asset")
 
-        # the number of shares that are closed out
-        cleared = copysign(min(abs(self.amount), abs(txn.amount)), self.amount)
-        # number of shares left-over, treated as new transaction
-        excess = self.amount + txn.amount if abs(txn.amount) > abs(self.amount) else 0
+        # default return values
+        cleared = 0
+        excess = 0
+        pnl_realized = PNL_REALIZED_ZERO
+
+        # if in the same direction, add to the current lot
+        # otherwise, treat it as a close out, excess amounts are
+        # treated as a new transaction
+        if copysign(1, txn.amount) == copysign(1, self.amount):
+            cleared = txn.amount
+        else:
+            # cleared amounts are shares that were transacted
+            cleared = copysign(min(self.amount, txn.amount, key=abs), txn.amount)
+            excess = (
+                self.amount + txn.amount if abs(txn.amount) > abs(self.amount) else 0
+            )
 
         # first process cleared amounts and adjust basis
         # if fully closed out, basis will calculate to 0
@@ -339,13 +384,15 @@ class Lot(object):
 
         # calculate pnl based on what has been cleared before the cost_basis as been adjusted
         # pnl calculations should account for shorts as well
-        over_year_long = self.transaction_date < txn.dt - pd.Timedelta(days=365)
-        holding_period = "long_term" if over_year_long else "short_term"
-        cleared_direction = "long" if copysign(1, cleared) > 0 else "short"
+        # pnl is realized only when positions are closed out
+        if copysign(1, txn.amount) != copysign(1, self.amount):
+            over_year_long = self.transaction_date < txn.dt - pd.Timedelta(days=365)
+            holding_period = "long_term" if over_year_long else "short_term"
+            closed = copysign(cleared, self.amount)  # the shares that were closed out
+            closed_direction = "long" if closed > 0 else "short"
 
-        pnl = cleared * (txn.price - self.cost_basis)
-        pnl_realized = pd.DataFrame().reindex_like(PNL_REALIZED_ZERO)
-        pnl_realized.loc[cleared_direction, holding_period] = pnl
+            pnl = closed * (txn.price - self.cost_basis)
+            pnl_realized.loc[closed_direction, holding_period] = pnl
 
         # update rest of the metrics
         prev_cost = self.cost_basis * self.amount
@@ -356,6 +403,6 @@ class Lot(object):
         except ZeroDivisionError:
             self.cost_basis = 0.0
 
-        self.amount = self.amount - cleared
+        self.amount = self.amount + cleared
 
         return cleared, excess, pnl_realized

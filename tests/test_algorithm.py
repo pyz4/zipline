@@ -1253,6 +1253,50 @@ class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
             assert_equal(daily_stats.iloc[i]["position_weights"], expected)
 
 
+
+    def test_same_day_orders(self):
+        """
+        Ensure that a short position is opened when a long position is
+        closed out when transacting in more than the shares necessary.
+        """
+
+        def initialize(context, asset):
+            context.start_date = context.get_datetime()
+            context.ordered = False
+            context.exited = False
+            context.asset = context.sid(asset)
+
+        def handle_data(context, data):
+            # open the initial position
+            if not context.ordered:
+                context.order(context.asset, 1)
+                context.order(context.asset, 2)
+                context.ordered = True
+
+            context.record(
+                num_positions=len(context.portfolio.positions),
+                amount=context.portfolio.positions[context.asset].amount,
+                cost_basis=context.portfolio.positions[context.asset].cost_basis,
+                lots=context.portfolio.positions[context.asset].lots,
+            )
+
+        asset = self.ASSET_FINDER_EQUITY_SIDS[0]
+        result = self.run_algorithm(
+            initialize=initialize,
+            handle_data=handle_data,
+            asset=asset
+        )
+        result.to_pickle("/tmp/result.pkl")
+
+        idx = result.index[-1]
+        last_day = result.loc[idx]
+        lot = next(iter(last_day["lots"]))
+
+        self.assertEqual(len(last_day["lots"]), 1)
+        self.assertEqual(lot.amount, 3)
+        self.assertEqual(last_day.cost_basis, lot.cost_basis)
+
+
 class TestBeforeTradingStart(zf.WithMakeAlgo, zf.ZiplineTestCase):
     START_DATE = pd.Timestamp("2016-01-06", tz="utc")
     END_DATE = pd.Timestamp("2016-01-07", tz="utc")
