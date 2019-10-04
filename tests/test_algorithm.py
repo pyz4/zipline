@@ -932,6 +932,68 @@ class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
             idx = result.index[i]
             self.assertEqual(exp, result.loc[idx, 'lot_amounts'])
 
+    def test_result_save(self):
+        """
+        Ensure that the results file may be pickled and read back.
+        Test against some issues with recursive references in the results pd.DataFrame
+        That causes an error when read back.
+        """
+        from itertools import count
+        from tempfile import TemporaryFile
+
+        # simple open close
+        def initialize(context, asset):
+            context.start_date = context.get_datetime()
+            context.asset = context.sid(asset)
+            context.counter = count()
+
+        # runs once per day
+        # reuse handle_data
+        def handle_data(context, data):
+            day = next(context.counter)
+
+            if day == 0:
+                context.order(context.asset, 2, target_lots=[])
+
+            if day == 1:
+                context.order(context.asset, 3, target_lots=[])
+
+            if day == 2:
+                context.order(context.asset, 1, target_lots=[])
+
+            if day == 3:
+                # sell lot acquired on day 1
+                lot = sorted(context.portfolio.positions[context.asset].lots)[1]
+                context.order(context.asset, -2, target_lots=[lot])
+
+            if day == 4:
+                lot = sorted(context.portfolio.positions[context.asset].lots)[2]
+                context.order(context.asset, -5, target_lots=[lot])
+
+
+            lots = context.portfolio.positions[context.asset].lots
+
+            try:
+                num_lots = len(lots)
+            except TypeError:
+                num_lots = 0
+
+            if lots is not None: 
+                context.record(
+                    num_lots=num_lots,
+                    lot_amounts=[n.amount for n in sorted(lots)]
+                )
+
+        asset = self.ASSET_FINDER_EQUITY_SIDS[0]
+        result = self.run_algorithm(
+            initialize=initialize, handle_data=handle_data, asset=asset
+        )
+
+        tmpfile = TemporaryFile()
+        result.to_pickle(tmpfile)
+
+        readback = pd.read_pickle(tmpfile)
+        pd.testing.assert_frame_equal(result, readback)
 
 class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
     START_DATE = pd.Timestamp("2006-01-03", tz="utc")
