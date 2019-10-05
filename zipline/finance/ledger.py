@@ -26,7 +26,6 @@ from six import iteritems, itervalues, PY2
 
 from zipline.assets import Future
 from zipline.finance.transaction import Transaction
-from zipline.utils.functional import rdict
 import zipline.protocol as zp
 from zipline.utils.sentinel import sentinel
 from .position import Position
