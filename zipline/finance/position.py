@@ -44,7 +44,6 @@ import weakref
 
 from zipline.assets import Future
 from zipline.finance.transaction import Transaction
-from zipline.utils.functional import rdict
 import zipline.protocol as zp
 
 log = logbook.Logger("Performance")
