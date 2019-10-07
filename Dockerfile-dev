@@ -31,7 +31,7 @@ RUN apt-get -y update \
 	&& apt-get -y install wget neovim python3-neovim ctags \
 	&& apt-get -y install silversearcher-ag
 
-RUN pip install dask blaze --upgrade
+RUN pip install dask blaze fsspec --upgrade
 
 
 # # install neovim setup
