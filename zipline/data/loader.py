@@ -157,7 +157,7 @@ def load_market_data(trading_day=None, trading_days=None, bm_symbol='SPY',
     )
 
     # combine dt indices and reindex using ffill then bfill
-    all_dt = br.index.union(tc.index)
+    all_dt = br.index.union(tc.index).drop_duplicates()
     br = br.reindex(all_dt, method='ffill').fillna(method='bfill')
     tc = tc.reindex(all_dt, method='ffill').fillna(method='bfill')
 
