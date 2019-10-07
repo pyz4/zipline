@@ -24,6 +24,7 @@ from six import iteritems
 
 from zipline.utils.exploding_object import NamedExplodingObject
 from zipline.finance._finance_ext import minute_annual_volatility
+from ..position import PNL_REALIZED_ZERO
 
 
 class SimpleLedgerField(object):
@@ -256,6 +257,42 @@ class BenchmarkReturnsAndVolatility(object):
             v = None
         packet['cumulative_risk_metrics']['benchmark_volatility'] = v
 
+
+class PNLRealized(object):
+    """Tracks daily and cumulative realized PNL.
+    Copied from PNL class below.
+    """
+    def start_of_simulation(self,
+                            ledger,
+                            emission_rate,
+                            trading_calendar,
+                            sessions,
+                            benchmark_source):
+        self._previous_pnl_realized = PNL_REALIZED_ZERO
+
+    def start_of_session(self, ledger, session, data_portal):
+        self._previous_pnl_realized = ledger.portfolio.pnl_realized
+
+    def _end_of_period(self, field, packet, ledger):
+        pnl_realized = ledger.portfolio.pnl_realized
+        packet[field]['pnl_realized'] = pnl_realized - self._previous_pnl_realized
+        packet['cumulative_perf']['pnl_realized'] = ledger.portfolio.pnl_realized
+
+    def end_of_bar(self,
+                   packet,
+                   ledger,
+                   dt,
+                   session_ix,
+                   data_portal):
+        self._end_of_period('minute_perf', packet, ledger)
+
+    def end_of_session(self,
+                       packet,
+                       ledger,
+                       session,
+                       session_ix,
+                       data_portal):
+        self._end_of_period('daily_perf', packet, ledger)
 
 class PNL(object):
     """Tracks daily and cumulative PNL.

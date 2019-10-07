@@ -28,7 +28,7 @@ from zipline.assets import Future
 from zipline.finance.transaction import Transaction
 import zipline.protocol as zp
 from zipline.utils.sentinel import sentinel
-from .position import Position
+from .position import Position, PnlRealized
 from ._finance_ext import (
     PositionStats,
     calculate_position_tracker_stats,
@@ -61,19 +61,11 @@ class PositionTracker(object):
         self._stats = PositionStats.new()
 
         # pnl collected from closing out individual lots
-        self.pnl_realized = pnl_realized=pd.DataFrame(
-                np.zeros((2, 2)),
-                columns=["long_term", "short_term"],
-                index=["long", "short"],
-            )
+        self.pnl_realized = PnlRealized()
 
     def collect_pnl_and_reset(self):
-        pnl_realized_copy = self.pnl_realized.copy(deep=True)
-
-        # reset
-        zeros = np.zeros((2, 2))
-        self.pnl_realized = pd.DataFrame(zeros).reindex_like(self.pnl_realized)
-
+        pnl_realized_copy = self.pnl_realized
+        self.pnl_realized = PnlRealized() # reset
         return pnl_realized_copy
 
     def update_position(
@@ -115,7 +107,7 @@ class PositionTracker(object):
         position.update(txn)
         if position.has_uncollected_pnl:
             pnl_realized = position.collect_pnl_and_reset()
-            self.pnl_realized = self.pnl_realized.add(pnl_realized, fill_value=0)
+            self.pnl_realized += pnl_realized
 
         if position.amount == 0:
             del self.positions[asset]
@@ -379,7 +371,7 @@ class Ledger(object):
         # Have some fields of the portfolio changed? This should be accessed
         # through ``self._dirty_portfolio``
         self.__dirty_portfolio = False
-        self._immutable_portfolio = zp.Portfolio(start, capital_base)
+        self._immutable_portfolio = zp.Portfolio(start, capital_base, pnl_realized=PnlRealized())
         self._portfolio = zp.MutableView(self._immutable_portfolio)
 
         self.daily_returns_series = pd.Series(np.nan, index=trading_sessions)
@@ -702,7 +694,7 @@ class Ledger(object):
         # TODO: update long-term and short-term pnl values
         if pt.has_uncollected_pnl:
             pnl_realized = pt.collect_pnl_and_reset()
-            portfolio.pnl_realized = portfolio.pnl_realized.add(pnl_realized, fill_value=0)
+            portfolio.pnl_realized += pnl_realized
 
         # the portfolio has been fully synced
         self._dirty_portfolio = False

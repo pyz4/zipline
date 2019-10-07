@@ -40,7 +40,6 @@ from textwrap import dedent
 import logbook
 import numpy as np
 import pandas as pd
-import weakref
 
 from zipline.assets import Future
 from zipline.finance.transaction import Transaction
@@ -48,10 +47,69 @@ import zipline.protocol as zp
 
 log = logbook.Logger("Performance")
 
-PNL_REALIZED_ZERO = pd.DataFrame(
-    np.zeros((2, 2)), columns=["long_term", "short_term"], index=["long", "short"]
-)
 
+class PnlRealized(object):
+    """
+    Subclassing pd.DataFrame throws a KeyError: 0 when
+    testing equality. Avoid this error by shielding the data as
+    an object but preserving many of the features of pd.DataFrame.
+    """
+
+    __slots__ = ('_data',)
+
+    def __init__(self, values=None):
+        zeros = pd.DataFrame(
+            np.zeros((2, 2)),
+            columns=["long_term", "short_term"],
+            index=["long", "short"],
+        )
+
+        if isinstance(values, dict):
+            self._data = zeros
+            self._data.update(pd.DataFrame.from_dict(values))
+        elif isinstance(values, pd.DataFrame):
+            self._data = values
+        elif values is None:
+            self._data=zeros
+        else:
+            raise TypeError("`values` must one of None, dictionary, or pandas.DataFrame, not {}".format(type(values)))
+
+    @property
+    def values(self):
+        return self._data.values
+
+    @property
+    def as_dataframe(self):
+        return self._data
+    
+    @property
+    def as_dict(self):
+        return self._data.to_dict()
+
+    def __getstate__(self):
+        return self._data.to_dict()
+
+    def __setstate__(self, data):
+        """define how object is unpickled"""
+        self._data = pd.DataFrame(data)
+
+    def __add__(self, other):
+        return type(self)(self._data.add(other._data))
+
+    def __sub__(self, other):
+        return type(self)(self._data.subtract(other._data))
+
+    def __eq__(self, other):
+        return self._data.equals(other._data) and type(self) is type(other)
+
+    def __repr__(self):
+        template = dedent("""PnlRealized({})""")
+        return template.format(self._data.as_dict)
+
+    def update(self, position_direction, holding_tenure, value):
+        self._data.loc[position_direction, holding_tenure] = value
+
+PNL_REALIZED_ZERO = PnlRealized()
 
 class Position(object):
     __slots__ = "inner_position", "protocol_position"
@@ -65,7 +123,7 @@ class Position(object):
             cost_basis=cost_basis,
             last_sale_price=last_sale_price,
             last_sale_date=last_sale_date,
-            pnl_realized=PNL_REALIZED_ZERO,
+            pnl_realized=PnlRealized(),
             lots=set(),
         )
         object.__setattr__(self, "inner_position", inner)
@@ -85,12 +143,7 @@ class Position(object):
         return np.count_nonzero(self.pnl_realized.values, axis=None)
 
     def collect_pnl_and_reset(self):
-        pnl_realized_copy = self.pnl_realized.copy(deep=True)
-
-        # reset
-        zeros = np.zeros((2, 2))
-        self.pnl_realized = pd.DataFrame(zeros).reindex_like(self.pnl_realized)
-
+        pnl_realized_copy, self.pnl_realized = self.pnl_realized, PnlRealized()
         return pnl_realized_copy
 
     def earn_dividend(self, dividend):
@@ -214,7 +267,7 @@ class Position(object):
             self.amount = total_shares
 
             # Update realized pnl for position
-            self.pnl_realized = self.pnl_realized.add(pnl_realized, fill_value=0)
+            self.pnl_realized = self.pnl_realized + pnl_realized
 
             # if txn closes outentire lot with excess,
             # then treat excess as a new transaction to be updated with
@@ -290,9 +343,11 @@ class Position(object):
         max(self.lots).adjust_cost_basis(adjustment)
 
     def __repr__(self):
-        template = dedent("asset: {asset}, amount: {amount}, \
+        template = dedent(
+            "asset: {asset}, amount: {amount}, \
                 cost_basis: {cost_basis}, \
-                last_sale_price: {last_sale_price}")
+                last_sale_price: {last_sale_price}"
+        )
         return template.format(
             asset=self.asset,
             amount=self.amount,
@@ -386,12 +441,13 @@ class Lot(object):
         # pnl is realized only when positions are closed out
         if copysign(1, txn.amount) != copysign(1, self.amount):
             over_year_long = self.transaction_date < txn.dt - pd.Timedelta(days=365)
-            holding_period = "long_term" if over_year_long else "short_term"
+            holding_tenure = "long_term" if over_year_long else "short_term"
             closed = copysign(cleared, self.amount)  # the shares that were closed out
             closed_direction = "long" if closed > 0 else "short"
 
             pnl = closed * (txn.price - self.cost_basis)
-            pnl_realized.loc[closed_direction, holding_period] = pnl
+            # pnl_realized.update(closed_direction, holding_tenure, pnl)
+            pnl_realized = PnlRealized({closed_direction: {holding_tenure: pnl}})
 
         # update rest of the metrics
         prev_cost = self.cost_basis * self.amount
