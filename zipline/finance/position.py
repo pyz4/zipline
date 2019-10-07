@@ -104,7 +104,7 @@ class PnlRealized(object):
 
     def __repr__(self):
         template = dedent("""PnlRealized({})""")
-        return template.format(self._data.as_dict)
+        return template.format(self.as_dict)
 
     def update(self, position_direction, holding_tenure, value):
         self._data.loc[position_direction, holding_tenure] = value

@@ -1014,6 +1014,7 @@ class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
 
         readback = pd.read_pickle(tmpfile)
         pd.testing.assert_frame_equal(result, readback)
+        pd.testing.assert_series_equal(result.pnl_realized, readback.pnl_realized)
 
 class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
     START_DATE = pd.Timestamp("2006-01-03", tz="utc")
