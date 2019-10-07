@@ -55,7 +55,7 @@ class PnlRealized(object):
     an object but preserving many of the features of pd.DataFrame.
     """
 
-    __slots__ = ('_data',)
+    __slots__ = ("_data",)
 
     def __init__(self, values=None):
         zeros = pd.DataFrame(
@@ -70,9 +70,13 @@ class PnlRealized(object):
         elif isinstance(values, pd.DataFrame):
             self._data = values
         elif values is None:
-            self._data=zeros
+            self._data = zeros
         else:
-            raise TypeError("`values` must one of None, dictionary, or pandas.DataFrame, not {}".format(type(values)))
+            raise TypeError(
+                "`values` must one of None, dictionary, or pandas.DataFrame, not {}".format(
+                    type(values)
+                )
+            )
 
     @property
     def values(self):
@@ -81,7 +85,7 @@ class PnlRealized(object):
     @property
     def as_dataframe(self):
         return self._data
-    
+
     @property
     def as_dict(self):
         return self._data.to_dict()
@@ -109,7 +113,6 @@ class PnlRealized(object):
     def update(self, position_direction, holding_tenure, value):
         self._data.loc[position_direction, holding_tenure] = value
 
-PNL_REALIZED_ZERO = PnlRealized()
 
 class Position(object):
     __slots__ = "inner_position", "protocol_position"
@@ -226,7 +229,7 @@ class Position(object):
 
             # default values modified if closing out a lot
             excess = 0
-            pnl_realized = PNL_REALIZED_ZERO
+            pnl_realized = PnlRealized()
             # already have the lot (i.e. order on the same day), update that lot
             if new_lot in self.lots:
                 # earlier order on same day
@@ -418,23 +421,26 @@ class Lot(object):
         # default return values
         cleared = 0
         excess = 0
-        pnl_realized = PNL_REALIZED_ZERO
+        cost_basis_adjustment_total = 0
+        pnl_realized = PnlRealized()
 
         # if in the same direction, add to the current lot
         # otherwise, treat it as a close out, excess amounts are
         # treated as a new transaction
         if copysign(1, txn.amount) == copysign(1, self.amount):
             cleared = txn.amount
+            cost_basis_adjustment_total = txn.amount * txn.price
         else:
             # cleared amounts are shares that were transacted
             cleared = copysign(min(self.amount, txn.amount, key=abs), txn.amount)
             excess = (
                 self.amount + txn.amount if abs(txn.amount) > abs(self.amount) else 0
             )
+            cost_basis_adjustment_total = cleared * self.cost_basis
 
         # first process cleared amounts and adjust basis
         # if fully closed out, basis will calculate to 0
-        total_shares = self.amount + txn.amount
+        total_shares = self.amount + cleared
 
         # calculate pnl based on what has been cleared before the cost_basis as been adjusted
         # pnl calculations should account for shorts as well
@@ -446,13 +452,15 @@ class Lot(object):
             closed_direction = "long" if closed > 0 else "short"
 
             pnl = closed * (txn.price - self.cost_basis)
-            # pnl_realized.update(closed_direction, holding_tenure, pnl)
-            pnl_realized = PnlRealized({closed_direction: {holding_tenure: pnl}})
+            pnl_realized.update(
+                position_direction=closed_direction,
+                holding_tenure=holding_tenure,
+                value=pnl,
+            )
 
         # update rest of the metrics
         prev_cost = self.cost_basis * self.amount
-        txn_cost = txn.amount * txn.price
-        total_cost = prev_cost + txn_cost
+        total_cost = prev_cost + cost_basis_adjustment_total
         try:
             self.cost_basis = total_cost / total_shares
         except ZeroDivisionError:

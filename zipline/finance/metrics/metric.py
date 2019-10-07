@@ -24,7 +24,7 @@ from six import iteritems
 
 from zipline.utils.exploding_object import NamedExplodingObject
 from zipline.finance._finance_ext import minute_annual_volatility
-from ..position import PNL_REALIZED_ZERO
+from ..position import PnlRealized
 
 
 class SimpleLedgerField(object):
@@ -268,7 +268,7 @@ class PNLRealized(object):
                             trading_calendar,
                             sessions,
                             benchmark_source):
-        self._previous_pnl_realized = PNL_REALIZED_ZERO
+        self._previous_pnl_realized = PnlRealized()
 
     def start_of_session(self, ledger, session, data_portal):
         self._previous_pnl_realized = ledger.portfolio.pnl_realized

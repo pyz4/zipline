@@ -839,9 +839,13 @@ class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
         closed out when transacting in more than the shares necessary.
         """
         from itertools import count
+        from zipline.finance import slippage, commission
 
         # simple open close
         def initialize(context, asset):
+            context.set_commission(commission.PerShare(cost=0, min_trade_cost=0))
+            context.set_slippage(slippage.FixedSlippage(spread=0.0))
+
             context.start_date = context.get_datetime()
             context.asset = context.sid(asset)
             context.counter = count()
@@ -874,9 +878,12 @@ class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
         )
 
         self.assertTrue('pnl_realized' in result.columns.values)
-        # self.assertTrue(result.pnl_realized[70]['short_term'].sum() > 0.0)
-        # self.assertTrue(result.pnl_realized[-30]['long_term'].sum() == 0.0)
-        # self.assertTrue(result.pnl_realized[-29]['long_term'].sum() > 0.0)
+        self.assertEqual(result.pnl_realized[70].as_dataframe['short_term'].sum(), 69.0)
+        self.assertEqual(result.pnl_realized[70].as_dataframe['long_term'].sum(), 0.0)
+        self.assertEqual(result.pnl_realized[-29].as_dataframe['long_term'].sum(), 522.0)
+        self.assertEqual(result.pnl_realized[-29].as_dataframe['short_term'].sum(), 0.0)
+        self.assertEqual(result.pnl_realized[-1].as_dataframe['long_term'].sum(), 0.0)
+        self.assertEqual(result.pnl_realized[-1].as_dataframe['short_term'].sum(), 0.0)
 
     def test_close_lots(self):
         """
@@ -2003,8 +2010,6 @@ def handle_data(context, data):
             stats.transactions = stats.transactions.apply(
                 lambda txns: [toolz.dissoc(txn, "order_id") for txn in txns]
             )
-        print(multi_stats.columns.values)
-        print(batch_stats.columns.values)
         assert_equal(multi_stats, batch_stats)
 
     def test_batch_market_order_filters_null_orders(self):
