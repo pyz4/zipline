@@ -207,7 +207,6 @@ class Position(object):
         return return_cash
 
     def update(self, txn):
-        # pyz NOTE: Called from ledger.PositionTracker.execute_transaction
         if self.asset != txn.asset:
             raise Exception("updating position with txn for a " "different asset")
 
@@ -382,7 +381,6 @@ class Lot(object):
         self.transaction_date = transaction_date
         self.amount = amount
         self.cost_basis = cost_basis
-        # garbage collection safe: https://stackoverflow.com/questions/10791588/getting-container-parent-object-from-within-python
 
     def __eq__(self, other):
         return (self.asset, self.transaction_date) == (
@@ -397,15 +395,12 @@ class Lot(object):
         return hash((self.asset, self.transaction_date))
 
     def __repr__(self):
-        template = "Lot(asset={asset}, \
-                transaction_date={transaction_date}, amount={amount}, \
-                cost_basis={cost_basis})"
-        return template.format(
-            asset=self.asset,
-            transaction_date=self.transaction_date,
-            amount=self.amount,
-            cost_basis=self.cost_basis,
+        template = dedent(
+            "Lot(asset={asset}, \
+             transaction_date={transaction_date}, amount={amount}, \
+             cost_basis={cost_basis})"
         )
+        return template.format(**self.__dict__)
 
     def adjust_cost_basis(self, adjustment):
         self.cost_basis += adjustment
