@@ -16,6 +16,7 @@ from warnings import warn
 
 import pandas as pd
 import numpy as np
+import dill
 
 from ._protocol import BarData, InnerPosition  # noqa
 from .assets import Asset
@@ -410,3 +411,29 @@ class Positions(dict):
                  " instead.".format(type(key).__name__))
 
         return _DeprecatedSidLookupPosition(key)
+
+class CerealBox(object):
+    """
+    Class for wrapping functions and making them
+    serializable using the `dill` module
+    """
+
+    def __init__(self, func):
+        if not callable(func):
+            raise TypeError("`func` in CerealBox must be callable")
+        self._function = func
+
+    def __call__(self, *args, **kwargs):
+        return self._function(*args, **kwargs)
+
+    def __getstate__(self):
+        return dill.dumps(self._function)
+
+    def __setstate__(self, state):
+        self._function = dill.loads(state)
+
+    def __eq__(self, other):
+        return type(self) is type(other) and dill.dumps(self._function) == dill.dumps(other._function)
+
+    def __hash__(self):
+        return hash(dill.dumps(self._function))

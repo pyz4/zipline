@@ -17,8 +17,10 @@ from __future__ import division
 from copy import copy
 
 from zipline.assets import Asset
-from zipline.protocol import DATASOURCE_TYPE
+from zipline.protocol import DATASOURCE_TYPE, CerealBox
 from zipline.utils.input_validation import expect_types
+
+import dill
 
 
 class Transaction(object):
@@ -34,7 +36,7 @@ class Transaction(object):
         self.type = DATASOURCE_TYPE.TRANSACTION
         self.target_lots = target_lots
         # min => lots ordered by txn_date, effectively FIFO
-        self.closing_rule = closing_rule
+        self.closing_rule = None if closing_rule is None else CerealBox(closing_rule)
 
     def __getitem__(self, name):
         return self.__dict__[name]

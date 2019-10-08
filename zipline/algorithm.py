@@ -1196,7 +1196,7 @@ class TradingAlgorithm(object):
         stop_price=None,
         style=None,
         target_lots=[],
-        closing_rule=min,
+        closing_rule=None,
     ):
         """Place an order for a fixed number of shares.
 
@@ -1601,7 +1601,14 @@ class TradingAlgorithm(object):
     @api_method
     @disallowed_in_before_trading_start(OrderInBeforeTradingStart())
     def order_percent(
-        self, asset, percent, limit_price=None, stop_price=None, style=None
+        self,
+        asset,
+        percent,
+        limit_price=None,
+        stop_price=None,
+        style=None,
+        *args,
+        **kwargs
     ):
         """Place an order in the specified asset corresponding to the given
         percent of the current portfolio value.
@@ -1897,7 +1904,7 @@ class TradingAlgorithm(object):
     @api_method
     @expect_types(share_counts=pd.Series)
     @expect_dtypes(share_counts=int64_dtype)
-    def batch_market_order(self, share_counts):
+    def batch_market_order(self, share_counts, target_lots=[], closing_rule=None):
         """Place a batch market order for multiple assets.
 
         Parameters
@@ -1912,7 +1919,7 @@ class TradingAlgorithm(object):
         """
         style = MarketOrder()
         order_args = [
-            (asset, amount, style)
+            (asset, amount, style, None, target_lots, closing_rule)
             for (asset, amount) in iteritems(share_counts)
             if amount
         ]

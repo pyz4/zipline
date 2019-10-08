@@ -967,6 +967,7 @@ class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
         """
         from itertools import count
         from tempfile import TemporaryFile
+        from zipline.protocol import CerealBox
 
         # simple open close
         def initialize(context, asset):
@@ -974,29 +975,39 @@ class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
             context.asset = context.sid(asset)
             context.counter = count()
 
+
+        def closing_rule_factory(current_price):
+            def closing_rule(lot):
+                return max(lot, key = lambda x: x.cost_basis - current_price)
+            
+            return closing_rule
+
         # runs once per day
         # reuse handle_data
         def handle_data(context, data):
             day = next(context.counter)
 
+            current_price = data.current(context.asset, "price")
+            closing_rule = closing_rule_factory(current_price)
+            # orders placed
+            # using closing_rule to test pickling support of functions
             if day == 0:
-                context.order(context.asset, 2, target_lots=[])
+                context.order(context.asset, 2, target_lots=[], closing_rule=closing_rule)
 
             if day == 1:
-                context.order(context.asset, 3, target_lots=[])
+                context.order(context.asset, 3, target_lots=[], closing_rule=closing_rule)
 
             if day == 2:
-                context.order(context.asset, 1, target_lots=[])
+                context.order(context.asset, 1, target_lots=[], closing_rule=closing_rule)
 
             if day == 3:
                 # sell lot acquired on day 1
                 lot = sorted(context.portfolio.positions[context.asset].lots)[1]
-                context.order(context.asset, -2, target_lots=[lot])
+                context.order(context.asset, -2, target_lots=[lot], closing_rule=closing_rule)
 
             if day == 4:
                 lot = sorted(context.portfolio.positions[context.asset].lots)[2]
-                context.order(context.asset, -5, target_lots=[lot])
-
+                context.order(context.asset, -5, target_lots=[lot], closing_rule=closing_rule)
 
             lots = context.portfolio.positions[context.asset].lots
 

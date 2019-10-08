@@ -98,7 +98,7 @@ class Order(object):
         self.type = zp.DATASOURCE_TYPE.ORDER
         self.broker_order_id = None
         self.target_lots = target_lots
-        self.closing_rule = closing_rule
+        self.closing_rule = None if closing_rule is None else zp.CerealBox(closing_rule)
 
     @staticmethod
     def make_id():
