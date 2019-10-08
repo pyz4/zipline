@@ -1,0 +1,24 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+pytest = "*"
+nose-parameterized = "*"
+blaze = "*"
+textfixtures = {git = "https://github.com/Simplistix/testfixtures.git"}
+nose = "*"
+responses = "*"
+ta-lib = "*"
+
+[packages]
+cython = "*"
+setuptools-scm = "*"
+numpy = "<2.0.0,>1.11.1"
+zipline = {editable = true,path = "."}
+dill = "*"
+matplotlib = "*"
+
+[requires]
+python_version = "3.5"
