@@ -182,24 +182,39 @@ class Position(object):
         if dividend.asset != self.asset:
             raise TypeError("Dividend.asset must match position.asset")
 
-        # allocating this earned amount among the lots
-        total_shares = sum(x.amount for x in self.lots)
-        total_dividend_amount = self.amount * dividend.amount
-
+        total_shares = sum([lot.amount for lot in self.lots])
         if self.amount != total_shares:
             raise ValueError(
                 "Shares recorded among lots are inconsistent with total shares registered with the position"
             )
 
         for lot in self.lots:
-            allocated_amount = lot.amount / total_shares * total_dividend_amount
+            proportion = abs(lot.amount) / abs(total_shares)
+            # allocated_amount < 0 to show dividend obligation on short positions
+            allocated_amount = (
+                abs(total_shares)
+                * proportion
+                * dividend.amount_per_share
+                * copysign(1, lot.amount)
+            )
+
+            threshold = pd.Timedelta(60, "D")
+            holding_period = dividend.ex_date - lot.transaction_date
+
+            tax_status = (
+                "qualified"
+                if holding_period > threshold and allocated_amount > 0
+                else "ordinary"
+            )
+
             dividend = Dividend(
                 asset=dividend.asset,
-                amount=allocated_amount,
+                amount_per_share=dividend.amount_per_share,
+                total_amount=allocated_amount,
                 ex_date=dividend.ex_date,
                 pay_date=dividend.pay_date,
                 ledger_status="earned",
-                tax_status="ordinary",
+                tax_status=tax_status,
             )
             lot._dividends.add(dividend)
 
@@ -475,22 +490,21 @@ class Lot(object):
         self.cost_basis += adjustment
 
     def process_dividend_payment(self, pay_date):
-        dividends_paid = set()
+        pnl_realized = PnlRealized()
         for div in self.earned_dividends:
             if div.pay_date == pay_date:
                 div.update_paid()
-                dividends_paid.add(div)
 
-        # return a PnlRealized instance to keep ledger consistent
-        # payment_amount is negative for short positions, representing
-        # short position holder's obligation to pay the dividend
-        direction = "long" if self.amount > 0 else "short"
-        pnl_realized = [
-            PnlRealized({"ordinary_dividend": {direction: div.amount * self.amount}})
-            for div in dividends_paid
-        ]
+                # return a PnlRealized instance to keep ledger consistent.
+                # Div.total_amount is negative for short positions, representing
+                # short position holder's obligation to pay the dividend
+                direction = "long" if div.total_amount > 0 else "short"
+                tax_status = div.tax_status
+                pnl_realized += PnlRealized(
+                    {"{}_dividend".format(tax_status): {direction: div.total_amount}}
+                )
 
-        return sum(pnl_realized)
+        return pnl_realized
 
     def update(self, txn):
         """

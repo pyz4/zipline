@@ -1,13 +1,14 @@
 from collections import namedtuple
+from enum import Enum
 from errno import ENOENT
 from os import remove
 from textwrap import dedent
 
 from logbook import Logger
-import numpy as np
 from numpy import integer as any_integer
-import pandas as pd
 from pandas import Timestamp
+import numpy as np
+import pandas as pd
 import six
 import sqlite3
 
@@ -34,28 +35,55 @@ SELECT sid, amount, pay_date from dividend_payouts
 WHERE ex_date=? AND sid IN ({0})
 """
 
-
 class Dividend(object):
     __slots__ = (
         "asset",
-        "amount",
+        "amount_per_share",
+        "total_amount",
         "ex_date",
         "pay_date",
         "ledger_status",
         "tax_status",
     )
+    """
+    Object representing a dividend payment on stock.
+
+    Parameters
+    ---------
+        asset : Asset instance
+        amount_per_share : float
+            Dollars paid per share of stock held on ex-dividend date;
+            will always be a positive
+        total_amount : float
+            Dollars paid on the dividend instance;
+            Negative values represent a dividend obligation
+        ex_date : pd.Timestamp
+            ex-dividend date
+        pay_date : pd.Timestamp
+            date the dividend is paid
+        ledger_status : str
+            one of "earned" or "paid"
+        tax_status : str
+            either "ordinary" or "qualified"
+    """
 
     def __init__(
         self,
         asset,
-        amount,
+        amount_per_share,
+        total_amount,
         ex_date,
         pay_date,
         ledger_status="earned",
         tax_status="ordinary",
     ):
+        assert ledger_status in ['earned', 'paid']
+        assert tax_status in ['ordinary', 'qualified']
+
         self.asset = asset
-        self.amount = amount
+        self.amount_per_share = amount_per_share
+        # total_amount = amount_per_share * shares paid on
+        self.total_amount = total_amount
         self.ex_date = ex_date
         self.pay_date = pay_date
         self.ledger_status = ledger_status
@@ -64,7 +92,8 @@ class Dividend(object):
     def __iter__(self):
         yield from [
             self.asset,
-            self.amount,
+            self.amount_per_share,
+            self.total_amount,
             self.ex_date,
             self.pay_date,
             self.ledger_status,
@@ -75,7 +104,8 @@ class Dividend(object):
         template = dedent(
             """
             asset={asset},
-            amount={amount},
+            amount_per_share={amount_per_share},
+            total_amount={total_amount}
             ex_date={ex_date},
             pay_date={pay_date},
             ledger_status={ledger_status},
@@ -84,7 +114,8 @@ class Dividend(object):
         )
         return template.format(
             asset=self.asset,
-            amount=self.amount,
+            amount_per_share=self.amount_per_share,
+            total_amount=self.total_amount,
             ex_date=self.ex_date,
             pay_date=self.pay_date,
             ledger_status=self.ledger_status,
@@ -96,6 +127,9 @@ class Dividend(object):
 
     def update_qualified(self):
         self.tax_status = "qualified"
+
+    def update_total_amount(self, shares):
+        self.total_amount = shares * self.amount_per_share
 
 
 # Dividend = namedtuple("Dividend", ["asset", "amount", "ex_date", "pay_date"])
@@ -301,7 +335,8 @@ class SQLiteAdjustmentReader(object):
             for row in rows:
                 div = Dividend(
                     asset=asset_finder.retrieve_asset(row[0]),
-                    amount=row[1],
+                    amount_per_share=row[1],
+                    total_amount=None, # to be set when applied to shares
                     ex_date=date,
                     pay_date=Timestamp(row[2], unit="s", tz="UTC"),
                 )
@@ -644,7 +679,6 @@ class SQLiteAdjustmentWriter(object):
         self._write_stock_dividends(stock_dividends)
 
         # Second from the dividend payouts, calculate ratios.
-        print(dividends)
         dividend_ratios = self.calc_dividend_ratios(dividends)
         self.write_frame("dividends", dividend_ratios)
 

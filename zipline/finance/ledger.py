@@ -326,24 +326,27 @@ class PositionTracker(object):
         """
 
         net_pnl_realized_adjustment = PnlRealized()
-        for lot in filter(lambda x: x.amount > 0, self._lots_store):
+        for lot in self._lots_store:
 
             lot.process_dividend_payment(session)
 
-            for div in filter(lambda y: y.tax_status == "ordinary", lot.paid_dividends):
+            for div in filter(lambda x: x.tax_status == "ordinary" and x.total_amount > 0, lot.paid_dividends):
                 threshold = pd.Timedelta(60, "D")
                 holding_period = session - lot.transaction_date
-                window_start = div.ex_date - pd.Timedelta(60, "D")
 
                 # the fact the lot was issued a dividend means that it
                 # was held on the ex-dividend date. That means we only
                 # need to check that the holding period is sufficient
                 if holding_period > threshold:
                     div.update_qualified()
+                    # do not reclassify div.total_amount since some
+                    # shares may have been closed before the end of
+                    # the threshold holding period.
+                    reclass_amount = lot.amount * div.amount_per_share
                     net_pnl_realized_adjustment += PnlRealized(
                         {
-                            "ordinary_dividend": {"long": -div.amount * lot.amount},
-                            "qualified_dividend": {"long": div.amount * lot.amount},
+                            "ordinary_dividend": {"long": -reclass_amount},
+                            "qualified_dividend": {"long": reclass_amount},
                         }
                     )
 
