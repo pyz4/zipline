@@ -217,12 +217,14 @@ class PNLRealized(object):
         self._previous_pnl_realized = PnlRealized()
 
     def start_of_session(self, ledger, session, data_portal):
-        self._previous_pnl_realized = ledger.portfolio.pnl_realized
+        pass 
+        # self._previous_pnl_realized = deepcopy(ledger.portfolio.pnl_realized)
 
     def _end_of_period(self, field, packet, ledger):
         pnl_realized = ledger.portfolio.pnl_realized
         packet[field]["pnl_realized"] = pnl_realized - self._previous_pnl_realized
         packet["cumulative_perf"]["pnl_realized"] = ledger.portfolio.pnl_realized
+        self._previous_pnl_realized = pnl_realized
 
     def end_of_bar(self, packet, ledger, dt, session_ix, data_portal):
         self._end_of_period("minute_perf", packet, ledger)

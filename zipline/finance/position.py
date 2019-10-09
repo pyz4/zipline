@@ -43,6 +43,7 @@ import pandas as pd
 
 from zipline.assets import Future
 from zipline.finance.transaction import Transaction
+from zipline.data.adjustments import Dividend
 import zipline.protocol as zp
 
 log = logbook.Logger("Performance")
@@ -55,22 +56,27 @@ class PnlRealized(object):
     an object but preserving many of the features of pd.DataFrame.
     """
 
-    __slots__ = ("_data",)
+    __slots__ = ("_internal_data",)
 
     def __init__(self, values=None):
         zeros = pd.DataFrame(
-            np.zeros((2, 2)),
-            columns=["long_term", "short_term"],
+            np.zeros((2, 4)),
+            columns=[
+                "long_term",
+                "short_term",
+                "qualified_dividend",
+                "ordinary_dividend",
+            ],
             index=["long", "short"],
         )
 
         if isinstance(values, dict):
-            self._data = zeros
-            self._data.update(pd.DataFrame.from_dict(values))
+            self._internal_data = zeros
+            self._internal_data.update(pd.DataFrame.from_dict(values))
         elif isinstance(values, pd.DataFrame):
-            self._data = values
+            self._internal_data = values
         elif values is None:
-            self._data = zeros
+            self._internal_data = zeros
         else:
             raise TypeError(
                 "`values` must one of None, dictionary, or pandas.DataFrame, not {}".format(
@@ -79,39 +85,54 @@ class PnlRealized(object):
             )
 
     @property
-    def values(self):
-        return self._data.values
-
-    @property
     def as_dataframe(self):
-        return self._data
+        return self._internal_data
 
     @property
     def as_dict(self):
-        return self._data.to_dict()
+        return self._internal_data.to_dict()
+
+    @property
+    def _constructor(self):
+        raise NotImplementedError()
 
     def __getstate__(self):
-        return self._data.to_dict()
+        return self._internal_data.to_dict()
 
     def __setstate__(self, data):
         """define how object is unpickled"""
-        self._data = pd.DataFrame(data)
+        self._internal_data = pd.DataFrame(data)
 
     def __add__(self, other):
-        return type(self)(self._data.add(other._data))
+        return type(self)(self._internal_data.add(other._internal_data))
+
+    def __radd__(self, other):
+        if other == 0:
+            return self
+        else:
+            self.__add__(other)
 
     def __sub__(self, other):
-        return type(self)(self._data.subtract(other._data))
+        return type(self)(self._internal_data.subtract(other._internal_data))
+
+    def __rsub__(self, other):
+        if other == 0:
+            return self
+        else:
+            self.__add__(other)
 
     def __eq__(self, other):
-        return self._data.equals(other._data) and type(self) is type(other)
+        if type(self) is not type(other):
+            return False
+        a, b = self.as_dataframe.align(other.as_dataframe)
+        return a.equals(b)
 
     def __repr__(self):
         template = dedent("""PnlRealized({})""")
         return template.format(self.as_dict)
 
     def update(self, position_direction, holding_tenure, value):
-        self._data.loc[position_direction, holding_tenure] = value
+        self._internal_data.loc[position_direction, holding_tenure] = value
 
 
 class Position(object):
@@ -143,7 +164,7 @@ class Position(object):
 
     @property
     def has_uncollected_pnl(self):
-        return np.count_nonzero(self.pnl_realized.values, axis=None)
+        return np.count_nonzero(self.pnl_realized.as_dataframe.values, axis=None)
 
     def collect_pnl_and_reset(self):
         pnl_realized_copy, self.pnl_realized = self.pnl_realized, PnlRealized()
@@ -153,18 +174,50 @@ class Position(object):
         """
         Register the number of shares we held at this dividend's ex date so
         that we can pay out the correct amount on the dividend's pay date.
+
+        Parameters
+        ------------ 
+        dividends : iterable of (asset, amount, pay_date) namedtuples
         """
-        return {"amount": self.amount * dividend.amount}
+        if dividend.asset != self.asset:
+            raise TypeError("Dividend.asset must match position.asset")
+
+        # allocating this earned amount among the lots
+        total_shares = sum(x.amount for x in self.lots)
+        total_dividend_amount = self.amount * dividend.amount
+
+        if self.amount != total_shares:
+            raise ValueError(
+                "Shares recorded among lots are inconsistent with total shares registered with the position"
+            )
+
+        for lot in self.lots:
+            allocated_amount = lot.amount / total_shares * total_dividend_amount
+            dividend = Dividend(
+                asset=dividend.asset,
+                amount=allocated_amount,
+                ex_date=dividend.ex_date,
+                pay_date=dividend.pay_date,
+                ledger_status="earned",
+                tax_status="ordinary",
+            )
+            lot._dividends.add(dividend)
+
+        return list(self.lots)
 
     def earn_stock_dividend(self, stock_dividend):
         """
         Register the number of shares we held at this dividend's ex date so
         that we can pay out the correct amount on the dividend's pay date.
         """
+        # pyz TODO: proprogate this to among the lots
         return {
             "payment_asset": stock_dividend.payment_asset,
             "share_count": np.floor(self.amount * float(stock_dividend.ratio)),
         }
+
+    def process_dividends(self, session):
+        raise NotImplementedError()
 
     def handle_split(self, asset, ratio):
         """
@@ -173,6 +226,7 @@ class Position(object):
 
         Returns the unused cash.
         """
+        # pyz TODO: proprogate this among the lots
         if self.asset != asset:
             raise Exception("updating split with the wrong asset!")
 
@@ -374,13 +428,15 @@ class Position(object):
 @total_ordering
 class Lot(object):
 
-    __slots__ = ("amount", "asset", "cost_basis", "transaction_date")
+    __slots__ = ("amount", "asset", "cost_basis", "transaction_date", "_dividends")
 
     def __init__(self, asset, transaction_date, amount, cost_basis):
         self.asset = asset
         self.transaction_date = transaction_date
         self.amount = amount
         self.cost_basis = cost_basis
+
+        self._dividends = set()
 
     def __eq__(self, other):
         return (self.asset, self.transaction_date) == (
@@ -400,10 +456,41 @@ class Lot(object):
              transaction_date={transaction_date}, amount={amount}, \
              cost_basis={cost_basis})"
         )
-        return template.format(**self.__dict__)
+        return template.format(
+            asset=self.asset,
+            transaction_date=self.transaction_date,
+            amount=self.amount,
+            cost_basis=self.cost_basis,
+        )
+
+    @property
+    def earned_dividends(self):
+        return filter(lambda div: div.ledger_status == "earned", self._dividends)
+
+    @property
+    def paid_dividends(self):
+        return filter(lambda div: div.ledger_status == "paid", self._dividends)
 
     def adjust_cost_basis(self, adjustment):
         self.cost_basis += adjustment
+
+    def process_dividend_payment(self, pay_date):
+        dividends_paid = set()
+        for div in self.earned_dividends:
+            if div.pay_date == pay_date:
+                div.update_paid()
+                dividends_paid.add(div)
+
+        # return a PnlRealized instance to keep ledger consistent
+        # payment_amount is negative for short positions, representing
+        # short position holder's obligation to pay the dividend
+        direction = "long" if self.amount > 0 else "short"
+        pnl_realized = [
+            PnlRealized({"ordinary_dividend": {direction: div.amount * self.amount}})
+            for div in dividends_paid
+        ]
+
+        return sum(pnl_realized)
 
     def update(self, txn):
         """

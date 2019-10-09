@@ -50,7 +50,8 @@ class PositionTracker(object):
     def __init__(self, data_frequency):
         self.positions = OrderedDict()
 
-        self._unpaid_dividends = {}
+        # self._unpaid_dividends = {}
+        self._lots_store = set()
         self._unpaid_stock_dividends = {}
         self._positions_store = zp.Positions()
 
@@ -63,9 +64,28 @@ class PositionTracker(object):
         # pnl collected from closing out individual lots
         self.pnl_realized = PnlRealized()
 
+    def clean_lots_store(self, session):
+        # once it's been over 60 days since ex_date for all dividends
+        # the lot no longer needs to be tracked. If the lot has already been closed,
+        # this de-referencing should cause the lot to be garbage collected
+        div_event_open = False
+        threshold = pd.Timedelta(60, "D")
+
+        for lot in self._lots_store.copy():
+            # still need to be paid out - don't delete
+            if lot.earned_dividends:
+                continue
+
+            # tax status still uncertain - don't delete
+            if any(session < div.ex_date + threshold for div in lot.paid_dividends):
+                continue
+
+            # otherwise clean out
+            self._lots_store.remove(lot)
+
     def collect_pnl_and_reset(self):
         pnl_realized_copy = self.pnl_realized
-        self.pnl_realized = PnlRealized() # reset
+        self.pnl_realized = PnlRealized()  # reset
         return pnl_realized_copy
 
     def update_position(
@@ -121,7 +141,7 @@ class PositionTracker(object):
 
     @property
     def has_uncollected_pnl(self):
-        return np.count_nonzero(self.pnl_realized.values, axis=None)
+        return np.count_nonzero(self.pnl_realized.as_dataframe.values, axis=None)
 
     def handle_commission(self, asset, cost):
         # Adjust the cost basis of the stock if we own it
@@ -173,11 +193,12 @@ class PositionTracker(object):
 
             # Store the earned dividends so that they can be paid on the
             # dividends' pay_dates.
-            div_owed = self.positions[cash_dividend.asset].earn_dividend(cash_dividend)
-            try:
-                self._unpaid_dividends[cash_dividend.pay_date].append(div_owed)
-            except KeyError:
-                self._unpaid_dividends[cash_dividend.pay_date] = [div_owed]
+            # keep record of the lots with earned dividends so that they can
+            # be paid on the dividend pay_dates
+            asset = cash_dividend.asset
+            pay_date = cash_dividend.pay_date
+            lots_with_earned_div = self.positions[asset].earn_dividend(cash_dividend)
+            self._lots_store.update(lots_with_earned_div)  # add to the store
 
         for stock_dividend in stock_dividends:
             self._dirty_stats = True  # only mark dirty if we pay a dividend
@@ -196,20 +217,24 @@ class PositionTracker(object):
         according to the accumulated bookkeeping of earned, unpaid, and stock
         dividends.
         """
-        net_cash_payment = 0.0
+        # cash dividends
+        net_cash_div_realized = PnlRealized()
 
-        try:
-            payments = self._unpaid_dividends[next_trading_day]
-            # Mark these dividends as paid by dropping them from our unpaid
-            del self._unpaid_dividends[next_trading_day]
-        except KeyError:
-            payments = []
+        for lot in self._lots_store:
+            if any(x.pay_date == next_trading_day for x in lot.earned_dividends):
+                # marked as paid
+                net_cash_div_realized += lot.process_dividend_payment(next_trading_day)
 
-        # representing the fact that we're required to reimburse the owner of
-        # the stock for any dividends paid while borrowing.
-        for payment in payments:
-            net_cash_payment += payment["amount"]
+        # update pnl_realized in the tracker to
+        # later be filtered upwards upon running ledger.update_portfolio
+        self.pnl_realized += net_cash_div_realized
 
+        dividends_realized = net_cash_div_realized.as_dataframe.filter(
+            regex="_dividend$"
+        )
+        net_cash_payment = dividends_realized.values.sum()
+
+        # stock dividends
         # Add stock for any stock dividends paid.  Again, the values here may
         # be negative in the case of short positions.
         try:
@@ -283,6 +308,46 @@ class PositionTracker(object):
             )
 
         update_position_last_sale_prices(self.positions, get_price, dt)
+
+    def process_dividends_tax_status(self, session):
+        """
+        go through each lot and make pnl_realized adjustments
+        depending on whether the paid_dividends were ordinary (default)
+        or qualified (only known ex-post)
+
+        A dividend payment on ordinary stock
+        achieves qualified status
+        if the lot was held for more than 60 days during
+        the 121 day period starting 60 days before the
+        dividend payment's ex-dividend date
+
+        qualified status only applies to dividend received
+        (i.e. paid on long positions held)
+        """
+
+        net_pnl_realized_adjustment = PnlRealized()
+        for lot in filter(lambda x: x.amount > 0, self._lots_store):
+
+            lot.process_dividend_payment(session)
+
+            for div in filter(lambda y: y.tax_status == "ordinary", lot.paid_dividends):
+                threshold = pd.Timedelta(60, "D")
+                holding_period = session - lot.transaction_date
+                window_start = div.ex_date - pd.Timedelta(60, "D")
+
+                # the fact the lot was issued a dividend means that it
+                # was held on the ex-dividend date. That means we only
+                # need to check that the holding period is sufficient
+                if holding_period > threshold:
+                    div.update_qualified()
+                    net_pnl_realized_adjustment += PnlRealized(
+                        {
+                            "ordinary_dividend": {"long": -div.amount * lot.amount},
+                            "qualified_dividend": {"long": div.amount * lot.amount},
+                        }
+                    )
+
+        self.pnl_realized += net_pnl_realized_adjustment
 
     @property
     def stats(self):
@@ -371,7 +436,9 @@ class Ledger(object):
         # Have some fields of the portfolio changed? This should be accessed
         # through ``self._dirty_portfolio``
         self.__dirty_portfolio = False
-        self._immutable_portfolio = zp.Portfolio(start, capital_base, pnl_realized=PnlRealized())
+        self._immutable_portfolio = zp.Portfolio(
+            start, capital_base, pnl_realized=PnlRealized()
+        )
         self._portfolio = zp.MutableView(self._immutable_portfolio)
 
         self.daily_returns_series = pd.Series(np.nan, index=trading_sessions)
@@ -589,6 +656,11 @@ class Ledger(object):
         # affect out cash.
         self._cash_flow(position_tracker.pay_dividends(next_session))
 
+        # Adjust pnl_realized due to dividends being reclassified as qualified
+        position_tracker.process_dividends_tax_status(next_session)
+
+        position_tracker.clean_lots_store(next_session)
+
     def capital_change(self, change_amount):
         self.update_portfolio()
         portfolio = self._portfolio
@@ -691,7 +763,6 @@ class Ledger(object):
         portfolio.pnl += pnl
         portfolio.returns = (1 + portfolio.returns) * (1 + returns) - 1
 
-        # TODO: update long-term and short-term pnl values
         if pt.has_uncollected_pnl:
             pnl_realized = pt.collect_pnl_and_reset()
             portfolio.pnl_realized += pnl_realized
