@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pytest
 import warnings
 import datetime
 from datetime import timedelta
@@ -65,6 +66,7 @@ from zipline.finance.asset_restrictions import (
 from zipline.finance.controls import AssetDateBounds
 from zipline.testing import (
     FakeDataPortal,
+    MockDailyBarReader,
     create_daily_df_for_asset,
     create_data_portal_from_trade_history,
     create_minute_df_for_asset,
@@ -785,255 +787,6 @@ class TestSetSymbolLookupDate(zf.WithMakeAlgo, zf.ZiplineTestCase):
         self.run_algorithm(initialize=initialize)
 
 
-class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
-    START_DATE = pd.Timestamp("2006-01-03", tz="utc")
-    END_DATE = START_DATE + pd.Timedelta(days=800)
-    SIM_PARAMS_CAPITAL_BASE = 1000
-
-    ASSET_FINDER_EQUITY_SIDS = (1, 133)
-
-    SIM_PARAMS_DATA_FREQUENCY = "daily"
-
-    @classmethod
-    def make_equity_daily_bar_data(cls, country_code, sids):
-        days = len(cls.equity_daily_bar_days)
-        prices = np.arange(1, days + 1)
-        frame = pd.DataFrame(
-            {
-                "open": prices,
-                "high": prices,
-                "low": prices,
-                "close": prices,
-                "volume": 100,
-            },
-            index=cls.equity_daily_bar_days,
-        )
-        return ((sid, frame) for sid in sids)
-
-    def test_pnl_realized_frame_equal(self):
-        """
-        Make sure that when pnl_realized as a dataframe is an element
-        of a series in the dataframe, that pd.testing.assert_frame_equal
-        does not error out with KeyError: 0
-        """
-        from zipline.finance.position import PnlRealized
-
-        # check that PnlRealized does not equal other pd.DataFrames
-        zeros = pd.DataFrame(
-            np.zeros((2, 2)),
-            columns=["long_term", "short_term"],
-            index=["long", "short"],
-        )
-        pnl_realized = PnlRealized()        
-        self.assertFalse(pnl_realized == zeros)
-
-        a = pd.DataFrame([PnlRealized()], columns=['pnl_realized'], index=[0])
-        b = pd.DataFrame([PnlRealized()], columns=['pnl_realized'], index=[0])
-
-        self.assertFalse(np.count_nonzero(PnlRealized().values))
-        pd.testing.assert_frame_equal(a, b)
-
-    def test_pnl_realized(self):
-        """
-        Ensure that a short position is opened when a long position is
-        closed out when transacting in more than the shares necessary.
-        """
-        from itertools import count
-        from zipline.finance import slippage, commission
-
-        # simple open close
-        def initialize(context, asset):
-            context.set_commission(commission.PerShare(cost=0, min_trade_cost=0))
-            context.set_slippage(slippage.FixedSlippage(spread=0.0))
-
-            context.start_date = context.get_datetime()
-            context.asset = context.sid(asset)
-            context.counter = count()
-            # buy 1 first 4 days, close out all last day
-
-            context.order_amounts = np.repeat(0, len(self.equity_daily_bar_days))
-            context.order_amounts[0] = 2  # buy 2 lot on first day
-            context.order_amounts[69] = -1  # sell 1 lot on 69th day
-            context.order_amounts[-30] = -1  # close out final lot
-
-        # runs once per day
-        # reuse handle_data
-        def handle_data(context, data):
-            try:
-                amount = context.order_amounts[next(context.counter)]
-
-                context.order(context.asset, amount)
-            except IndexError:
-                pass
-
-            context.record(
-                num_positions=len(context.portfolio.positions),
-                pnl=context.portfolio.pnl,
-            )
-
-        result = self.run_algorithm(
-            initialize=initialize,
-            handle_data=handle_data,
-            asset=self.ASSET_FINDER_EQUITY_SIDS[0],
-        )
-
-        self.assertTrue('pnl_realized' in result.columns.values)
-        self.assertEqual(result.pnl_realized[70].as_dataframe['short_term'].sum(), 69.0)
-        self.assertEqual(result.pnl_realized[70].as_dataframe['long_term'].sum(), 0.0)
-        self.assertEqual(result.pnl_realized[-29].as_dataframe['long_term'].sum(), 522.0)
-        self.assertEqual(result.pnl_realized[-29].as_dataframe['short_term'].sum(), 0.0)
-        self.assertEqual(result.pnl_realized[-1].as_dataframe['long_term'].sum(), 0.0)
-        self.assertEqual(result.pnl_realized[-1].as_dataframe['short_term'].sum(), 0.0)
-
-    def test_close_lots(self):
-        """
-        Ensure that a short position is opened when a long position is
-        closed out when transacting in more than the shares necessary.
-        """
-        from itertools import count
-
-        # simple open close
-        def initialize(context, asset):
-            context.start_date = context.get_datetime()
-            context.asset = context.sid(asset)
-            context.counter = count()
-
-        # runs once per day
-        # reuse handle_data
-        def handle_data(context, data):
-            day = next(context.counter)
-
-            if day == 0:
-                context.order(context.asset, 2, target_lots=[])
-
-            if day == 1:
-                context.order(context.asset, 3, target_lots=[])
-
-            if day == 2:
-                context.order(context.asset, 1, target_lots=[])
-
-            if day == 3:
-                # sell lot acquired on day 1
-                lot = sorted(context.portfolio.positions[context.asset].lots)[1]
-                context.order(context.asset, -2, target_lots=[lot])
-
-            if day == 4:
-                lot = sorted(context.portfolio.positions[context.asset].lots)[2]
-                context.order(context.asset, -5, target_lots=[lot])
-
-
-            lots = context.portfolio.positions[context.asset].lots
-
-            try:
-                num_lots = len(lots)
-            except TypeError:
-                num_lots = 0
-
-            if lots is not None: 
-                context.record(
-                    num_lots=num_lots,
-                    lot_amounts=[n.amount for n in sorted(lots)]
-                )
-
-        asset = self.ASSET_FINDER_EQUITY_SIDS[0]
-        result = self.run_algorithm(
-            initialize=initialize, handle_data=handle_data, asset=asset
-        )
-
-        # expected number of lots
-        expected = [(1, 1), (2, 2), (3, 3), (4, 3), (5, 1)]
-        for i, exp in expected:
-            idx = result.index[i]
-            self.assertEqual(exp, result.loc[idx, 'num_lots'])
-
-        expected = [
-            # (0, []),
-            (1, [2]),
-            (2, [2, 3]),
-            (3, [2, 3, 1]),
-            (4, [2, 1, 1]),
-            (5, [-1]),
-        ]
-
-        for i, exp in expected:
-            idx = result.index[i]
-            self.assertEqual(exp, result.loc[idx, 'lot_amounts'])
-
-    def test_result_save(self):
-        """
-        Ensure that the results file may be pickled and read back.
-        Test against some issues with recursive references in the results pd.DataFrame
-        That causes an error when read back.
-        """
-        from itertools import count
-        from tempfile import TemporaryFile
-        from zipline.protocol import CerealBox
-
-        # simple open close
-        def initialize(context, asset):
-            context.start_date = context.get_datetime()
-            context.asset = context.sid(asset)
-            context.counter = count()
-
-
-        def closing_rule_factory(current_price):
-            def closing_rule(lot):
-                return max(lot, key = lambda x: x.cost_basis - current_price)
-            
-            return closing_rule
-
-        # runs once per day
-        # reuse handle_data
-        def handle_data(context, data):
-            day = next(context.counter)
-
-            current_price = data.current(context.asset, "price")
-            closing_rule = closing_rule_factory(current_price)
-            # orders placed
-            # using closing_rule to test pickling support of functions
-            if day == 0:
-                context.order(context.asset, 2, target_lots=[], closing_rule=closing_rule)
-
-            if day == 1:
-                context.order(context.asset, 3, target_lots=[], closing_rule=closing_rule)
-
-            if day == 2:
-                context.order(context.asset, 1, target_lots=[], closing_rule=closing_rule)
-
-            if day == 3:
-                # sell lot acquired on day 1
-                lot = sorted(context.portfolio.positions[context.asset].lots)[1]
-                context.order(context.asset, -2, target_lots=[lot], closing_rule=closing_rule)
-
-            if day == 4:
-                lot = sorted(context.portfolio.positions[context.asset].lots)[2]
-                context.order(context.asset, -5, target_lots=[lot], closing_rule=closing_rule)
-
-            lots = context.portfolio.positions[context.asset].lots
-
-            try:
-                num_lots = len(lots)
-            except TypeError:
-                num_lots = 0
-
-            if lots is not None: 
-                context.record(
-                    num_lots=num_lots,
-                    lot_amounts=[n.amount for n in sorted(lots)]
-                )
-
-        asset = self.ASSET_FINDER_EQUITY_SIDS[0]
-        result = self.run_algorithm(
-            initialize=initialize, handle_data=handle_data, asset=asset
-        )
-
-        tmpfile = TemporaryFile()
-        result.to_pickle(tmpfile)
-
-        readback = pd.read_pickle(tmpfile)
-        pd.testing.assert_frame_equal(result, readback)
-        pd.testing.assert_series_equal(result.pnl_realized, readback.pnl_realized)
-
 class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
     START_DATE = pd.Timestamp("2006-01-03", tz="utc")
     END_DATE = pd.Timestamp("2006-01-06", tz="utc")
@@ -1291,8 +1044,6 @@ class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
         for i, expected in enumerate(expected_position_weights):
             assert_equal(daily_stats.iloc[i]["position_weights"], expected)
 
-
-
     def test_same_day_orders(self):
         """
         Ensure that a short position is opened when a long position is
@@ -1321,9 +1072,7 @@ class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
 
         asset = self.ASSET_FINDER_EQUITY_SIDS[0]
         result = self.run_algorithm(
-            initialize=initialize,
-            handle_data=handle_data,
-            asset=asset
+            initialize=initialize, handle_data=handle_data, asset=asset
         )
         result.to_pickle("/tmp/result.pkl")
 
@@ -2226,6 +1975,7 @@ def handle_data(context, data):
         self.assertTrue(all(num_positions == 0))
         self.assertTrue(all(amounts == 0))
 
+    @pytest.mark.skip(reason="should not be testing for an expected warning message")
     def test_schedule_function_time_rule_positionally_misplaced(self):
         """
         Test that when a user specifies a time rule for the date_rule argument,
