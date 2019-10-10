@@ -149,7 +149,7 @@ class PositionTracker(object):
             self._dirty_stats = True
             self.positions[asset].adjust_commission_cost_basis(asset, cost)
 
-    def handle_splits(self, splits):
+    def handle_splits(self, splits, session, data_portal):
         """Processes a list of splits by modifying any positions as needed.
 
         Parameters
@@ -171,8 +171,16 @@ class PositionTracker(object):
                 # Make the position object handle the split. It returns the
                 # leftover cash from a fractional share, if there is any.
                 position = self.positions[asset]
-                leftover_cash = position.handle_split(asset, ratio)
-                total_leftover_cash += leftover_cash
+                previous_session = data_portal.get_last_traded_dt(
+                    asset, session, "daily"
+                )
+                spot_price = data_portal.get_spot_value(
+                    asset, "price", previous_session, "daily"
+                )
+                cash_realized = position.handle_split(
+                    asset, ratio, cost_basis=0.0, spot_price=spot_price
+                )
+                total_leftover_cash += cash_realized.as_dataframe.values.sum()
 
         return total_leftover_cash
 
@@ -211,28 +219,19 @@ class PositionTracker(object):
             except KeyError:
                 self._unpaid_stock_dividends[stock_dividend.pay_date] = [div_owed]
 
-    def pay_dividends(self, next_trading_day):
+    def pay_dividends(self, next_trading_day, data_portal):
         """
         Returns a cash payment based on the dividends that should be paid out
         according to the accumulated bookkeeping of earned, unpaid, and stock
         dividends.
         """
         # cash dividends
-        net_cash_div_realized = PnlRealized()
+        net_cash_realized = PnlRealized()
 
         for lot in self._lots_store:
             if any(x.pay_date == next_trading_day for x in lot.earned_dividends):
                 # marked as paid
-                net_cash_div_realized += lot.process_dividend_payment(next_trading_day)
-
-        # update pnl_realized in the tracker to
-        # later be filtered upwards upon running ledger.update_portfolio
-        self.pnl_realized += net_cash_div_realized
-
-        dividends_realized = net_cash_div_realized.as_dataframe.filter(
-            regex="_dividend$"
-        )
-        net_cash_payment = dividends_realized.values.sum()
+                net_cash_realized += lot.process_dividend_payment(next_trading_day)
 
         # stock dividends
         # Add stock for any stock dividends paid.  Again, the values here may
@@ -252,9 +251,26 @@ class PositionTracker(object):
             else:
                 position = self.positions[payment_asset] = Position(payment_asset)
 
-            position.amount += share_count
+            last_traded_dt = data_portal.get_last_traded_dt(
+                payment_asset, next_trading_day, self.data_frequency
+            )
+            spot_price = data_portal.get_spot_value(
+                payment_asset, "price", last_traded_dt, self.data_frequency
+            )
+            cash_redemption = position.process_stock_dividends(
+                stock_payment["share_count"],
+                cost_basis=0,
+                spot_price=spot_price,
+                average_transaction_date=stock_payment["average_transaction_date"],
+            )
+            net_cash_realized += cash_redemption
 
-        return net_cash_payment
+        # pnl_realized updates here will bubble up to metrics when
+        # ledger runs `update_portfolio`
+        self.pnl_realized += net_cash_realized
+
+        net_cash = net_cash_realized.as_dataframe.values.sum()
+        return net_cash
 
     def maybe_create_close_position_transaction(self, asset, dt, data_portal):
         if not self.positions.get(asset):
@@ -330,7 +346,10 @@ class PositionTracker(object):
 
             lot.process_dividend_payment(session)
 
-            for div in filter(lambda x: x.tax_status == "ordinary" and x.total_amount > 0, lot.paid_dividends):
+            for div in filter(
+                lambda x: x.tax_status == "ordinary" and x.total_amount > 0,
+                lot.paid_dividends,
+            ):
                 threshold = pd.Timedelta(60, "D")
                 holding_period = session - lot.transaction_date
 
@@ -578,7 +597,7 @@ class Ledger(object):
         except KeyError:
             self._processed_transactions[transaction.dt] = [transaction_dict]
 
-    def process_splits(self, splits):
+    def process_splits(self, splits, session, data_portal):
         """Processes a list of splits by modifying any positions as needed.
 
         Parameters
@@ -586,7 +605,9 @@ class Ledger(object):
         splits: list[(Asset, float)]
             A list of splits. Each split is a tuple of (asset, ratio).
         """
-        leftover_cash = self.position_tracker.handle_splits(splits)
+        leftover_cash = self.position_tracker.handle_splits(
+            splits, session, data_portal
+        )
         if leftover_cash > 0:
             self._cash_flow(leftover_cash)
 
@@ -631,7 +652,9 @@ class Ledger(object):
         if txn is not None:
             self.process_transaction(txn)
 
-    def process_dividends(self, next_session, asset_finder, adjustment_reader):
+    def process_dividends(
+        self, next_session, asset_finder, adjustment_reader, data_portal
+    ):
         """Process dividends for the next session.
 
         This will earn us any dividends whose ex-date is the next session as
@@ -657,7 +680,7 @@ class Ledger(object):
 
         # Pay out the dividends whose pay-date is the next session. This does
         # affect out cash.
-        self._cash_flow(position_tracker.pay_dividends(next_session))
+        self._cash_flow(position_tracker.pay_dividends(next_session, data_portal))
 
         # Adjust pnl_realized due to dividends being reclassified as qualified
         position_tracker.process_dividends_tax_status(next_session)

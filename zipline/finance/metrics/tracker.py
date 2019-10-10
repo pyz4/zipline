@@ -176,8 +176,8 @@ class MetricsTracker(object):
     def process_transaction(self, transaction):
         self._ledger.process_transaction(transaction)
 
-    def handle_splits(self, splits):
-        self._ledger.process_splits(splits)
+    def handle_splits(self, splits, session, data_portal):
+        self._ledger.process_splits(splits, session, data_portal)
 
     def process_order(self, event):
         self._ledger.process_order(event)
@@ -262,6 +262,7 @@ class MetricsTracker(object):
                 session_label,
                 self._asset_finder,
                 adjustment_reader,
+                data_portal,
             )
 
         self._current_session = session_label

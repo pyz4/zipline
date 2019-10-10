@@ -49,6 +49,14 @@ import zipline.protocol as zp
 log = logbook.Logger("Performance")
 
 
+class LongShort(Enum):
+    long = 1
+    short = -1
+
+    def __str__(self):
+        return self.name
+
+
 class PnlRealized(object):
     """
     Subclassing pd.DataFrame throws a KeyError: 0 when
@@ -73,6 +81,9 @@ class PnlRealized(object):
         if isinstance(values, dict):
             self._internal_data = zeros
             self._internal_data.update(pd.DataFrame.from_dict(values))
+        elif isinstance(values, tuple):
+            self._internal_data = zeros
+            self.update(*values)
         elif isinstance(values, pd.DataFrame):
             self._internal_data = values
         elif values is None:
@@ -166,6 +177,29 @@ class Position(object):
     def has_uncollected_pnl(self):
         return np.count_nonzero(self.pnl_realized.as_dataframe.values, axis=None)
 
+    @property
+    def transaction_date(self):
+        """
+        Transaction Date of a position is deemed the weighted average of
+        the transaction_dates of each of its constituent lots
+        """
+        # default values
+        tzinfo = "UTC"
+
+        if self.lots:
+            tzinfo = max(self.lots).transaction_date.tzinfo
+
+        timedelta = [
+            (lot.transaction_date - pd.Timestamp(0, tz=tzinfo)).total_seconds()
+            for lot in self.lots
+        ]
+        weights = [lot.amount for lot in self.lots]
+        average_timedelta = np.average(timedelta, weights=weights)
+
+        return (
+            pd.Timestamp(0, tz=tzinfo) + pd.to_timedelta(average_timedelta, unit="s")
+        ).normalize()
+
     def collect_pnl_and_reset(self):
         pnl_realized_copy, self.pnl_realized = self.pnl_realized, PnlRealized()
         return pnl_realized_copy
@@ -224,24 +258,96 @@ class Position(object):
         """
         Register the number of shares we held at this dividend's ex date so
         that we can pay out the correct amount on the dividend's pay date.
+
+        For example, closing out a position will not affect the number of shares
+        received on the pay_date. Note passing a ratio would not work since
+        ratio * 0 = 0.
         """
-        # pyz TODO: proprogate this to among the lots
         return {
             "payment_asset": stock_dividend.payment_asset,
-            "share_count": np.floor(self.amount * float(stock_dividend.ratio)),
+            "share_count": np.trunc(self.amount * float(stock_dividend.ratio)),
+            "average_transaction_date": self.transaction_date,
         }
 
     def process_dividends(self, session):
         raise NotImplementedError()
 
-    def handle_split(self, asset, ratio):
+    def process_stock_dividends(
+        self, share_count, cost_basis, spot_price, average_transaction_date
+    ):
+        if not self.amount:
+            txn = Transaction(
+                asset=self.asset,
+                amount=share_count,
+                dt=average_transaction_date,
+                price=cost_basis,
+                order_id=None,
+            )
+            self.update(txn)
+            return PnlRealized()
+        else:
+            # handle_split treats ratio as new_amount = old_amount / ratio
+            ratio = 1 / (1 + share_count / self.amount)
+            # a stock dividend is the same thing has a split
+            return self.handle_split(
+                self.asset, ratio, cost_basis=0.0, spot_price=spot_price
+            )
+
+    def handle_fractional_amounts(self, amount, cost_basis, spot_price):
+        # handle fractional shares from each lot by aggregating
+        # and treating whole shares as a new lot at aggregate cost-basis
+        # while cashing out the remaining fractional share.
+        whole = np.trunc(amount)
+        fraction = amount - whole
+
+        if whole:
+            # tack on the full_share_count to the most recently-traded lot
+            # operationally, this should work as updating with a transaction
+            # with the transaction_date being an average of all the transaction_dates
+            # NOTE: I'm not sure how the IRS treats the holding period of these
+            # remainder shares
+            total_cost_basis = (
+                sum([lot.amount * lot.cost_basis for lot in self.lots])
+                + amount * cost_basis
+            )
+            total_shares = sum([lot.amount for lot in self.lots]) + amount
+            new_cost_basis = (
+                total_cost_basis / total_shares if total_shares > 0 else 0.0
+            )
+
+            # create new lot with the position's (average) transaction_date
+            txn = Transaction(
+                asset=self.asset,
+                amount=whole,
+                dt=self.transaction_date,
+                price=new_cost_basis,
+                order_id=None,
+                closing_rule=max,
+            )
+
+            self.update(txn)
+
+        self.reconcile("cost_basis", "amount")
+
+        cash_realized = PnlRealized()
+
+        # cash out the remaining fractional share
+        if fraction:
+            cash_amount = round(float(fraction * (spot_price - cost_basis)), 2)
+            long_short = LongShort(np.sign(self.amount))
+            cash_realized = PnlRealized(
+                (str(long_short), "ordinary_dividend", cash_amount)
+            )
+
+        return cash_realized
+
+    def handle_split(self, asset, ratio, cost_basis, spot_price):
         """
         Update the position by the split ratio, and return the resulting
         fractional share that will be converted into cash.
 
         Returns the unused cash.
         """
-        # pyz TODO: proprogate this among the lots
         if self.asset != asset:
             raise Exception("updating split with the wrong asset!")
 
@@ -251,29 +357,30 @@ class Position(object):
         # (old_share_count / ratio = new_share_count)
         # (old_price * ratio = new_price)
 
-        # e.g., 33.333
-        raw_share_count = self.amount / float(ratio)
+        # a split is essentially when new shares are issued at 0 cost basis
+        aggregate_leftover_shares = sum(
+            [lot.handle_split(ratio, cost_basis=0) for lot in self.lots]
+        )
+        cash_realized = self.handle_fractional_amounts(
+            aggregate_leftover_shares, cost_basis=0.0, spot_price=spot_price
+        )
+        return cash_realized
 
-        # e.g., 33
-        full_share_count = np.floor(raw_share_count)
+    def reconcile(self, *args):
 
-        # e.g., 0.333
-        fractional_share_count = raw_share_count - full_share_count
+        total_shares = sum([lot.amount for lot in self.lots])
+        total_cost_basis = sum([lot.amount * lot.cost_basis for lot in self.lots])
 
-        # adjust the cost basis to the nearest cent, e.g., 60.0
-        new_cost_basis = round(self.cost_basis * ratio, 2)
+        if "amount" in args:
+            setattr(self, "amount", total_shares)
 
-        self.cost_basis = new_cost_basis
-        self.amount = full_share_count
+        if "cost_basis" in args:
+            try:
+                cost_basis = total_cost_basis / total_shares
+            except ZeroDivisionError:
+                cost_basis = 0.0
 
-        return_cash = round(float(fractional_share_count * new_cost_basis), 2)
-
-        log.info("after split: " + str(self))
-        log.info("returning cash: " + str(return_cash))
-
-        # return the leftover cash, which will be converted into cash
-        # (rounded to the nearest cent)
-        return return_cash
+            setattr(self, "cost_basis", cost_basis)
 
     def update(self, txn):
         if self.asset != txn.asset:
@@ -289,7 +396,7 @@ class Position(object):
 
             new_lot = Lot(
                 txn.asset,
-                transaction_date=txn.dt,
+                transaction_date=txn.dt.normalize(),
                 amount=txn.amount,
                 cost_basis=txn.price,
             )
@@ -437,6 +544,7 @@ class Position(object):
             "cost_basis": self.cost_basis,
             "last_sale_price": self.last_sale_price,
             "lots": self.lots,
+            "transaction_date": self.transaction_date,
         }
 
 
@@ -488,6 +596,40 @@ class Lot(object):
 
     def adjust_cost_basis(self, adjustment):
         self.cost_basis += adjustment
+
+    def handle_split(self, ratio, cost_basis):
+        """
+        Update the position by the split ratio, and return the resulting
+        fractional share that will be converted into cash.
+
+        Returns the unused cash.
+        """
+        # adjust the # of shares by the ratio
+        # (if we had 100 shares, and the ratio is 3,
+        #  we now have 33 shares)
+        # (old_share_count / ratio = new_share_count)
+        # (old_price * ratio = new_price)
+
+        old_cost_basis_total = self.amount * self.cost_basis
+        old_shares = self.amount
+
+        # e.g., 33.333
+        new_shares_raw = self.amount / float(ratio) - self.amount
+
+        # e.g., 33
+        new_shares_whole = np.trunc(new_shares_raw)
+
+        # e.g., 0.333
+        fractional_share_count = new_shares_raw - new_shares_whole
+
+        # adjust the cost basis to the nearest cent, e.g., 60.0
+        new_cost_basis_total = old_cost_basis_total + new_shares_whole * cost_basis
+        new_cost_basis = new_cost_basis_total / (old_shares + new_shares_whole)
+
+        self.cost_basis = new_cost_basis
+        self.amount += new_shares_whole
+
+        return fractional_share_count
 
     def process_dividend_payment(self, pay_date):
         pnl_realized = PnlRealized()

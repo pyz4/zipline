@@ -19,6 +19,12 @@ from textwrap import dedent
 import datetime
 import pytest
 import warnings
+import sys
+
+if sys.version_info[0] < 3:
+    from StringIO import StringIO
+else:
+    from io import StringIO
 
 import logbook
 import toolz
@@ -56,6 +62,7 @@ from zipline.errors import (
 from zipline.finance.commission import PerShare, PerTrade
 from zipline.finance.execution import LimitOrder
 from zipline.finance.order import ORDER_STATUS
+from zipline.finance.position import PnlRealized
 from zipline.finance.trading import SimulationParameters
 from zipline.finance.asset_restrictions import (
     Restriction,
@@ -133,9 +140,6 @@ import zipline.utils.factory as factory
 
 
 _multiprocess_can_split_ = False
-
-
-
 
 
 class TestCashDividendPayments(
@@ -282,7 +286,6 @@ class TestCashDividendPayments(
             15,
         )
 
-
     def test_cash_dividends_ordinary(self):
         algo_code = dedent(
             """
@@ -305,8 +308,10 @@ class TestCashDividendPayments(
         algo = self.make_algo(script=algo_code)
         results = algo.run()
 
-        div = results.pnl_realized.sum().as_dataframe.loc[['long', 'short'], ['ordinary_dividend', 'qualified_dividend']]
-        assert_equal(div.values, np.array([[1, 0],[0,0]]))
+        div = results.pnl_realized.sum().as_dataframe.loc[
+            ["long", "short"], ["ordinary_dividend", "qualified_dividend"]
+        ]
+        assert_equal(div.values, np.array([[1, 0], [0, 0]]))
 
     def test_cash_dividends_close_after_exdate(self):
         algo_code = dedent(
@@ -330,8 +335,10 @@ class TestCashDividendPayments(
         algo = self.make_algo(script=algo_code)
         results = algo.run()
 
-        div = results.pnl_realized.sum().as_dataframe.loc[['long', 'short'], ['ordinary_dividend', 'qualified_dividend']]
-        assert_equal(div.values, np.array([[0, 3],[0,0]]))
+        div = results.pnl_realized.sum().as_dataframe.loc[
+            ["long", "short"], ["ordinary_dividend", "qualified_dividend"]
+        ]
+        assert_equal(div.values, np.array([[0, 3], [0, 0]]))
 
     def test_cash_dividends_ordinary_reclassified(self):
         algo_code = dedent(
@@ -354,13 +361,15 @@ class TestCashDividendPayments(
 
         algo = self.make_algo(script=algo_code)
         results = algo.run()
-        
 
-        div = results.pnl_realized.sum().as_dataframe.loc[['long', 'short'], ['ordinary_dividend', 'qualified_dividend']]
-        assert_equal(div.values, np.array([[0, 1],[0,0]]))
+        div = results.pnl_realized.sum().as_dataframe.loc[
+            ["long", "short"], ["ordinary_dividend", "qualified_dividend"]
+        ]
+        assert_equal(div.values, np.array([[0, 1], [0, 0]]))
 
     def test_cash_dividends_ordinary_reclassified_partial(self):
         from zipline.finance.position import PnlRealized
+
         algo_code = dedent(
             """
         from zipline.api import record, sid, date_rules
@@ -387,16 +396,24 @@ class TestCashDividendPayments(
         algo = self.make_algo(script=algo_code)
         results = algo.run()
 
-        div = results.loc[:"2016-03-01", 'pnl_realized'].sum().as_dataframe.loc[:, ['ordinary_dividend', 'qualified_dividend']]
-        expected = PnlRealized({"ordinary_dividend": {"long": 2}}).as_dataframe.loc[:, ['ordinary_dividend', 'qualified_dividend']]
+        div = (
+            results.loc[:"2016-03-01", "pnl_realized"]
+            .sum()
+            .as_dataframe.loc[:, ["ordinary_dividend", "qualified_dividend"]]
+        )
+        expected = PnlRealized({"ordinary_dividend": {"long": 2}}).as_dataframe.loc[
+            :, ["ordinary_dividend", "qualified_dividend"]
+        ]
         assert_equal(div, expected)
 
-        div = results.pnl_realized.sum().as_dataframe.loc[['long', 'short'], ['ordinary_dividend', 'qualified_dividend']]
-        assert_equal(div.values, np.array([[1, 1],[0,0]]))
-
+        div = results.pnl_realized.sum().as_dataframe.loc[
+            ["long", "short"], ["ordinary_dividend", "qualified_dividend"]
+        ]
+        assert_equal(div.values, np.array([[1, 1], [0, 0]]))
 
     def test_cash_dividend_short_position(self):
         from zipline.finance.position import PnlRealized
+
         algo_code = dedent(
             """
         from zipline.api import record, sid, date_rules
@@ -418,12 +435,13 @@ class TestCashDividendPayments(
         algo = self.make_algo(script=algo_code)
         results = algo.run()
 
-        expected = PnlRealized({'ordinary_dividend': {'short': -15.0}})
-        expected = expected.as_dataframe[['ordinary_dividend', 'qualified_dividend']]
+        expected = PnlRealized({"ordinary_dividend": {"short": -15.0}})
+        expected = expected.as_dataframe[["ordinary_dividend", "qualified_dividend"]]
 
-        div = results.pnl_realized.sum().as_dataframe[['ordinary_dividend', 'qualified_dividend']]
+        div = results.pnl_realized.sum().as_dataframe[
+            ["ordinary_dividend", "qualified_dividend"]
+        ]
         assert_equal(*div.align(expected))
-
 
 
 class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
@@ -687,7 +705,6 @@ class TestPnlAccounting(zf.WithMakeAlgo, zf.ZiplineTestCase):
         readback = pd.read_pickle(tmpfile)
         pd.testing.assert_frame_equal(result, readback)
         pd.testing.assert_series_equal(result.pnl_realized, readback.pnl_realized)
-
 
 
 class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
@@ -988,3 +1005,233 @@ class TestPositions(zf.WithMakeAlgo, zf.ZiplineTestCase):
         self.assertEqual(last_day.cost_basis, lot.cost_basis)
 
 
+class TestStockDividendPayments(
+    zf.WithMakeAlgo, zf.WithCreateBarData, zf.WithDataPortal, zf.ZiplineTestCase
+):
+    START_DATE = pd.Timestamp("2016-01-05", tz="UTC")
+    END_DATE = ASSET_FINDER_EQUITY_END_DATE = pd.Timestamp("2016-12-31", tz="UTC")
+    CREATE_BARDATA_DATA_FREQUENCY = "daily"
+
+    ASSET_FINDER_EQUITY_SIDS = set(range(1, 9))
+
+    SPLIT_ASSET_SID = 3
+    ILLIQUID_SPLIT_ASSET_SID = 4
+    MERGER_ASSET_SID = 5
+    ILLIQUID_MERGER_ASSET_SID = 6
+    DIVIDEND_ASSET_SID = 7
+    ILLIQUID_DIVIDEND_ASSET_SID = 8
+    STOCK_DIVIDEND_ASSET_SID = 7
+    BENCHMARK_SID = 8
+
+    @classmethod
+    def make_equity_info(cls):
+        frame = super(TestStockDividendPayments, cls).make_equity_info()
+        frame.loc[[1, 2], "end_date"] = pd.Timestamp("2016-12-31", tz="UTC")
+        return frame
+
+    @classmethod
+    def make_splits_data(cls):
+        return pd.DataFrame.from_records(
+            [
+                {
+                    "effective_date": str_to_seconds("2016-01-06"),
+                    "ratio": 0.5,
+                    "sid": cls.SPLIT_ASSET_SID,
+                },
+                {
+                    "effective_date": str_to_seconds("2016-01-07"),
+                    "ratio": 0.5,
+                    "sid": cls.ILLIQUID_SPLIT_ASSET_SID,
+                },
+            ]
+        )
+
+    @classmethod
+    def make_mergers_data(cls):
+        return pd.DataFrame.from_records(
+            [
+                {
+                    "effective_date": str_to_seconds("2016-01-06"),
+                    "ratio": 0.5,
+                    "sid": cls.MERGER_ASSET_SID,
+                },
+                {
+                    "effective_date": str_to_seconds("2016-01-07"),
+                    "ratio": 0.6,
+                    "sid": cls.ILLIQUID_MERGER_ASSET_SID,
+                },
+            ]
+        )
+
+    # @classmethod
+    # def make_dividends_data(cls):
+    #     data = StringIO(
+    #         dedent(
+    #             """
+    #         amount,ex_date,declared_date,record_date,pay_date
+    #         1.0,02/04/2016,01/26/2016,02/08/2016,02/11/2016
+    #         2.0,05/05/2016,04/26/2016,05/09/2016,05/12/2016
+    #         4.0,08/04/2016,07/26/2016,08/08/2016,08/11/2016
+    #         8.0,11/03/2016,10/25/2016,11/07/2016,11/10/2016
+    #     """
+    #         )
+    #     )
+    #     div = pd.read_csv(
+    #         data, parse_dates=["ex_date", "declared_date", "record_date", "pay_date"]
+    #     )
+    #     div["sid"] = cls.DIVIDEND_ASSET_SID
+    #     return div
+
+    @classmethod
+    def make_stock_dividends_data(cls):
+        data = StringIO(
+            dedent(
+                """
+            ratio,ex_date,declared_date,record_date,pay_date
+            0.1111111,02/04/2016,01/26/2016,02/08/2016,02/11/2016
+            0.2222222,05/05/2016,04/26/2016,05/09/2016,05/12/2016
+            0.4444444,08/04/2016,07/26/2016,08/08/2016,08/11/2016
+            0.8888888,11/03/2016,10/25/2016,11/07/2016,11/10/2016
+        """
+            )
+        )
+        div = pd.read_csv(
+            data, parse_dates=["ex_date", "declared_date", "record_date", "pay_date"]
+        )
+        div["sid"] = cls.STOCK_DIVIDEND_ASSET_SID
+        div["payment_sid"] = cls.STOCK_DIVIDEND_ASSET_SID
+        return div
+
+    @classmethod
+    def make_adjustment_writer_equity_daily_bar_reader(cls):
+        return MockDailyBarReader(
+            dates=cls.trading_calendar.sessions_in_range(cls.START_DATE, cls.END_DATE)
+        )
+
+    @classmethod
+    def make_equity_daily_bar_data(cls, country_code, sids):
+        for sid in sids:
+            asset = cls.asset_finder.retrieve_asset(sid)
+            yield sid, create_daily_df_for_asset(
+                cls.trading_calendar,
+                asset.start_date,
+                asset.end_date,
+                interval=2 - sid % 2,
+            )
+
+    @classmethod
+    def init_class_fixtures(cls):
+        super(TestStockDividendPayments, cls).init_class_fixtures()
+
+        cls.ASSET1 = cls.asset_finder.retrieve_asset(1)
+        cls.ASSET2 = cls.asset_finder.retrieve_asset(2)
+        cls.SPLIT_ASSET = cls.asset_finder.retrieve_asset(cls.SPLIT_ASSET_SID)
+        cls.ILLIQUID_SPLIT_ASSET = cls.asset_finder.retrieve_asset(
+            cls.ILLIQUID_SPLIT_ASSET_SID
+        )
+        cls.MERGER_ASSET = cls.asset_finder.retrieve_asset(cls.MERGER_ASSET_SID)
+        cls.ILLIQUID_MERGER_ASSET = cls.asset_finder.retrieve_asset(
+            cls.ILLIQUID_MERGER_ASSET_SID
+        )
+        cls.DIVIDEND_ASSET = cls.asset_finder.retrieve_asset(cls.DIVIDEND_ASSET_SID)
+        cls.ILLIQUID_DIVIDEND_ASSET = cls.asset_finder.retrieve_asset(
+            cls.ILLIQUID_DIVIDEND_ASSET_SID
+        )
+        cls.STOCK_DIVIDEND_ASSET = cls.asset_finder.retrieve_asset(
+            cls.STOCK_DIVIDEND_ASSET_SID
+        )
+        cls.ASSETS = [cls.ASSET1, cls.ASSET2]
+
+    def test_stock_dividend_payout(self):
+
+        algo_code = dedent(
+            """
+        from zipline.api import record, sid, date_rules
+        import pandas as pd
+        def initialize(context):
+            context.asset = sid({})
+            context.schedule_function(
+                lambda c,d: c.order(c.asset, 1e3), 
+                date_rules.on_dates([pd.Timestamp("2016-01-21")]))
+
+        def handle_data(context, data):
+            pass
+        """
+        ).format(type(self).STOCK_DIVIDEND_ASSET_SID)
+
+        algo = self.make_algo(script=algo_code)
+        results = algo.run()
+
+        positions = results.positions.iloc[-1][0]
+        dividends = results.pnl_realized.sum().as_dataframe
+
+        self.assertEqual(positions["amount"], 3701)
+        assert_equal(
+            dividends, PnlRealized(("long", "ordinary_dividend", 84255.0)).as_dataframe
+        )
+
+    def test_stock_dividend_payout_short_position(self):
+
+        algo_code = dedent(
+            """
+        from zipline.api import record, sid, date_rules
+        import pandas as pd
+        def initialize(context):
+            context.asset = sid({})
+            context.schedule_function(
+                lambda c,d: c.order(c.asset, -1000), 
+                date_rules.on_dates([pd.Timestamp("2016-01-21")]))
+
+        def handle_data(context, data):
+            pass
+        """
+        ).format(type(self).STOCK_DIVIDEND_ASSET_SID)
+
+        algo = self.make_algo(script=algo_code)
+        results = algo.run()
+
+        positions = results.positions.iloc[-1][0]
+        dividends = results.pnl_realized.sum().as_dataframe
+
+        self.assertEqual(positions["amount"], -3701)
+        assert_equal(
+            dividends,
+            PnlRealized(("short", "ordinary_dividend", -84255.0)).as_dataframe,
+        )
+
+    def test_stock_dividend_payout_after_position_closed(self):
+
+        algo_code = dedent(
+            """
+        from zipline.api import record, sid, date_rules
+        import pandas as pd
+        def initialize(context):
+            context.asset = sid({})
+            context.schedule_function(
+                lambda c,d: c.order(c.asset, 1e3), 
+                date_rules.on_dates(["2016-01-21"]))
+            
+            context.schedule_function(
+                lambda c,d: c.order_target_value(c.asset, 0),
+                date_rules.on_dates(["2016-02-10"]))
+
+            # close out the stock dividends received
+            context.schedule_function(
+                lambda c,d: c.order_target_value(c.asset, 0),
+                date_rules.on_dates(["2016-02-17"]))
+
+        def handle_data(context, data):
+            pass
+        """
+        ).format(type(self).STOCK_DIVIDEND_ASSET_SID)
+
+        algo = self.make_algo(script=algo_code)
+        results = algo.run()
+
+        idx = "2016-02-16"
+        positions = results.loc[idx, 'positions'][0][0]
+        self.assertEqual(positions["amount"], 111)
+        self.assertEqual(positions["transaction_date"].strftime("%Y-%m-%d"), "2016-01-21")
+
+        positions = results['positions'][-1]
+        self.assertEqual(positions, [])

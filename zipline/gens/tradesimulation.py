@@ -170,7 +170,7 @@ class AlgorithmSimulator(object):
                                                 midnight_dt)
                 if splits:
                     algo.blotter.process_splits(splits)
-                    metrics_tracker.handle_splits(splits)
+                    metrics_tracker.handle_splits(splits, midnight_dt, data_portal)
 
         def on_exit():
             # Remove references to algo, data portal, et al to break cycles
