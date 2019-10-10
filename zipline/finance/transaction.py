@@ -17,49 +17,53 @@ from __future__ import division
 from copy import copy
 
 from zipline.assets import Asset
-from zipline.protocol import DATASOURCE_TYPE
+from zipline.protocol import DATASOURCE_TYPE, CerealBox
 from zipline.utils.input_validation import expect_types
+
+import dill
 
 
 class Transaction(object):
     @expect_types(asset=Asset)
-    def __init__(self, asset, amount, dt, price, order_id):
+    def __init__(
+        self, asset, amount, dt, price, order_id, target_lots=[], closing_rule=None
+    ):
         self.asset = asset
         self.amount = amount
         self.dt = dt
         self.price = price
         self.order_id = order_id
         self.type = DATASOURCE_TYPE.TRANSACTION
+        self.target_lots = target_lots
+        # min => lots ordered by txn_date, effectively FIFO
+        self.closing_rule = None if closing_rule is None else CerealBox(closing_rule)
 
     def __getitem__(self, name):
         return self.__dict__[name]
 
     def __repr__(self):
-        template = (
-            "{cls}(asset={asset}, dt={dt},"
-            " amount={amount}, price={price})"
-        )
+        template = "{cls}(asset={asset}, dt={dt}," " amount={amount}, price={price})"
 
         return template.format(
             cls=type(self).__name__,
             asset=self.asset,
             dt=self.dt,
             amount=self.amount,
-            price=self.price
+            price=self.price,
         )
 
     def to_dict(self):
         py = copy(self.__dict__)
-        del py['type']
-        del py['asset']
+        del py["type"]
+        del py["asset"]
 
         # Adding 'sid' for backwards compatibility with downstrean consumers.
-        py['sid'] = self.asset
+        py["sid"] = self.asset
 
         # If you think this looks dumb, that is because it is! We once stored
         # commission here, but haven't for over a year. I don't want to change
         # the perf packet structure yet.
-        py['commission'] = None
+        py["commission"] = None
 
         return py
 
@@ -79,7 +83,9 @@ def create_transaction(order, dt, price, amount):
         amount=int(amount),
         dt=dt,
         price=price,
-        order_id=order.id
+        order_id=order.id,
+        target_lots=order.target_lots,
+        closing_rule=order.closing_rule,
     )
 
     return transaction

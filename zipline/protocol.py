@@ -15,10 +15,12 @@
 from warnings import warn
 
 import pandas as pd
+import numpy as np
+import dill
 
+from ._protocol import BarData, InnerPosition  # noqa
 from .assets import Asset
 from .utils.enum import enum
-from ._protocol import BarData, InnerPosition  # noqa
 
 
 class MutableView(object):
@@ -184,12 +186,13 @@ class Portfolio(object):
         Amount of cash in the portfolio at the start of the backtest.
     """
 
-    def __init__(self, start_date=None, capital_base=0.0):
+    def __init__(self, start_date=None, capital_base=0.0, pnl_realized=None):
         self_ = MutableView(self)
         self_.cash_flow = 0.0
         self_.starting_cash = capital_base
         self_.portfolio_value = capital_base
         self_.pnl = 0.0
+        self_.pnl_realized=pnl_realized
         self_.returns = 0.0
         self_.cash = capital_base
         self_.positions = Positions()
@@ -408,3 +411,29 @@ class Positions(dict):
                  " instead.".format(type(key).__name__))
 
         return _DeprecatedSidLookupPosition(key)
+
+class CerealBox(object):
+    """
+    Class for wrapping functions and making them
+    serializable using the `dill` module
+    """
+
+    def __init__(self, func):
+        if not callable(func):
+            raise TypeError("`func` in CerealBox must be callable")
+        self._function = func
+
+    def __call__(self, *args, **kwargs):
+        return self._function(*args, **kwargs)
+
+    def __getstate__(self):
+        return dill.dumps(self._function)
+
+    def __setstate__(self, state):
+        self._function = dill.loads(state)
+
+    def __eq__(self, other):
+        return type(self) is type(other) and dill.dumps(self._function) == dill.dumps(other._function)
+
+    def __hash__(self):
+        return hash(dill.dumps(self._function))

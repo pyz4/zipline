@@ -163,6 +163,8 @@ def parse_dividends(data, show_progress):
         inplace=True,
         copy=False,
     )
+    print("modding pay_date")
+    data['pay_date'] = data['ex_date'] + pd.Timedelta(7, 'D')
     return data
 
 

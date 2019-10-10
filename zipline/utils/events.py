@@ -470,6 +470,17 @@ class NotHalfDay(StatelessRule):
         return self.cal.minute_to_session_label(dt) \
             not in self.cal.early_closes
 
+class OnDates(StatelessRule):
+    """
+    A rule that only triggers on the specified dates.
+    Useful for executing orders on particular days in the tests
+    """
+    def __init__(self, dates):
+        self._dates = list(map(ensure_utc, map(pd.Timestamp, dates)))
+
+    def should_trigger(self, dt):
+        return dt.normalize() in self._dates 
+
 
 class TradingDayOfWeekRule(six.with_metaclass(ABCMeta, StatelessRule)):
     @preprocess(n=lossless_float_to_int('TradingDayOfWeekRule'))
@@ -663,6 +674,21 @@ class date_rules(object):
         rule : zipline.utils.events.EventRule
         """
         return NDaysBeforeLastTradingDayOfMonth(n=days_offset)
+
+    @staticmethod
+    def on_dates(dates):
+        """
+        Rule triggers on the dates provided. Useful for testing
+
+        Parameters
+        ---------
+        dates : list[pd.Timestamp]
+
+        Returns
+        ------
+        rule : zipline.utils.events.EventRule
+        """
+        return OnDates(dates)
 
     @staticmethod
     def week_start(days_offset=0):

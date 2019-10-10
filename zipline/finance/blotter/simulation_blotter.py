@@ -92,7 +92,7 @@ class SimulationBlotter(Blotter):
                    current_dt=self.current_dt)
 
     @expect_types(asset=Asset)
-    def order(self, asset, amount, style, order_id=None):
+    def order(self, asset, amount, style, order_id=None, target_lots=[], closing_rule=min):
         """Place an order.
 
         Parameters
@@ -107,6 +107,11 @@ class SimulationBlotter(Blotter):
             The execution style for the order.
         order_id : str, optional
             The unique identifier for this order.
+        target_lots : list of Lots, optional
+            How the order should be allocated among the lots
+        closing_rule : callable, optional
+            Function mapping Position.get_lots() -> Lot
+            Secondary to target_lots. Default is min (i.e. FIFO)
 
         Returns
         -------
@@ -144,7 +149,9 @@ class SimulationBlotter(Blotter):
             amount=amount,
             stop=style.get_stop_price(is_buy),
             limit=style.get_limit_price(is_buy),
-            id=order_id
+            id=order_id,
+            target_lots=target_lots,
+            closing_rule=closing_rule,
         )
 
         self.open_orders[order.asset].append(order)

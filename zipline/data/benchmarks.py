@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import pandas as pd
 import requests
+
+IEX_TOKEN = os.environ.get("IEX_PUBLIC_TOKEN")
 
 
 def get_benchmark_returns(symbol):
@@ -30,13 +33,15 @@ def get_benchmark_returns(symbol):
     get up to 5 years worth of data.
     """
     r = requests.get(
-        'https://api.iextrading.com/1.0/stock/{}/chart/5y'.format(symbol)
+        "https://cloud.iexapis.com/stable/stock/{}/chart/5y?token={}".format(
+            symbol, IEX_TOKEN
+        )
     )
     data = r.json()
 
     df = pd.DataFrame(data)
 
-    df.index = pd.DatetimeIndex(df['date'])
-    df = df['close']
+    df.index = pd.DatetimeIndex(df["date"])
+    df = df["close"]
 
-    return df.sort_index().tz_localize('UTC').pct_change(1).iloc[1:]
+    return df.sort_index().tz_localize("UTC").pct_change(1).iloc[1:]

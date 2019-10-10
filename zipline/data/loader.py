@@ -157,7 +157,7 @@ def load_market_data(trading_day=None, trading_days=None, bm_symbol='SPY',
     )
 
     # combine dt indices and reindex using ffill then bfill
-    all_dt = br.index.union(tc.index)
+    all_dt = br.index.union(tc.index).drop_duplicates()
     br = br.reindex(all_dt, method='ffill').fillna(method='bfill')
     tc = tc.reindex(all_dt, method='ffill').fillna(method='bfill')
 
@@ -214,6 +214,7 @@ def ensure_benchmark_data(symbol, first_date, last_date, now, trading_day,
 
     try:
         data = get_benchmark_returns(symbol)
+        data = data.loc[~data.index.duplicated(keep='first')]
         data.to_csv(get_data_filepath(filename, environ))
     except (OSError, IOError, HTTPError):
         logger.exception('Failed to cache the new benchmark returns')
@@ -278,6 +279,7 @@ def ensure_treasury_data(symbol, first_date, last_date, now, environ=None):
 
     try:
         data = loader_module.get_treasury_data(first_date, last_date)
+        data = data.loc[~data.index.duplicated(keep='first')]
         data.to_csv(get_data_filepath(filename, environ))
     except (OSError, IOError, HTTPError):
         logger.exception('failed to cache treasury data')
