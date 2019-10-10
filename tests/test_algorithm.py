@@ -12,9 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import pytest
 import warnings
 import datetime
+import unittest
 from datetime import timedelta
 from functools import partial
 from textwrap import dedent
@@ -1975,7 +1975,7 @@ def handle_data(context, data):
         self.assertTrue(all(num_positions == 0))
         self.assertTrue(all(amounts == 0))
 
-    @pytest.mark.skip(reason="should not be testing for an expected warning message")
+    @unittest.skip("should not be testing for an expected warning message")
     def test_schedule_function_time_rule_positionally_misplaced(self):
         """
         Test that when a user specifies a time rule for the date_rule argument,
